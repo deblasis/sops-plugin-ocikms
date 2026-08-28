@@ -38,14 +38,26 @@ func TestMain(m *testing.M) {
 	}
 	dir, err := os.MkdirTemp("", "ocisim-creds-*")
 	if err != nil {
+		if sim != nil {
+			sim.Close()
+		}
 		fmt.Fprintln(os.Stderr, "ocisim:", err)
 		os.Exit(1)
 	}
 	credKeyDir = dir
 	if code, err := buildPluginAndCreds(dir); err != nil {
+		// no m.Run(): release everything before the exit code is lost
+		if sim != nil {
+			sim.Close()
+		}
+		os.RemoveAll(dir)
 		fmt.Fprintln(os.Stderr, "ocisim:", err)
 		os.Exit(1)
 	} else if code != 0 {
+		if sim != nil {
+			sim.Close()
+		}
+		os.RemoveAll(dir)
 		os.Exit(code)
 	}
 	code := m.Run()
@@ -60,7 +72,7 @@ func TestMain(m *testing.M) {
 // key the SDK signs with. Returns a nonzero exit code only for a failed
 // build; a missing stunt binary is a skip, not a failure.
 func buildPluginAndCreds(dir string) (int, error) {
-	pluginBin = filepath.Join(dir, "sops-plugin-ocikms.exe")
+	pluginBin = filepath.Join(dir, "sops-plugin-ocikms"+exeSuffix())
 	if out, err := exec.Command("go", "build", "-o", pluginBin, "github.com/deblasis/sops-plugin-ocikms/cmd/sops-plugin-ocikms").CombinedOutput(); err != nil {
 		return 1, fmt.Errorf("building plugin: %v: %s", err, out)
 	}
@@ -113,12 +125,14 @@ func startPlugin(t *testing.T) *pluginSession {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	s := &pluginSession{t: t, cmd: cmd, in: stdin, out: bufio.NewReaderSize(stdout, 16<<20)}
-	s.handshake()
+	// registered before the handshake: a failed handshake must not leak the
+	// process just because cleanup was not reached yet
 	t.Cleanup(func() {
 		stdin.Close()
 		cmd.Wait()
 	})
+	s := &pluginSession{t: t, cmd: cmd, in: stdin, out: bufio.NewReaderSize(stdout, 16<<20)}
+	s.handshake()
 	return s
 }
 
@@ -197,6 +211,18 @@ func requireSim(t *testing.T) {
 	if sim == nil {
 		t.Skip("stunt server unavailable")
 	}
+}
+
+// cleanupDeactivate restores healthy behavior after the test; a failed
+// deactivate would poison every later test on the shared server, so it is an
+// error, not a log line.
+func cleanupDeactivate(t *testing.T) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := sim.Deactivate(); err != nil {
+			t.Errorf("deactivate after test: %v", err)
+		}
+	})
 }
 
 func wantCode(t *testing.T, res wireResponse, code string) {
@@ -288,7 +314,7 @@ func TestFailureInjectionProfiles(t *testing.T) {
 			if err := sim.Activate(tc.profile); err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() { sim.Deactivate() })
+			cleanupDeactivate(t)
 			s := startPlugin(t)
 			res := s.do(encryptReq(1, Key1, sim.Endpoint(), []byte("k")))
 			wantCode(t, res, tc.want)
@@ -314,6 +340,11 @@ func TestProfileRecovery(t *testing.T) {
 
 func TestFlapAlternates(t *testing.T) {
 	requireSim(t)
+	// flap parity is a KV counter: reset so the first call fails regardless
+	// of what earlier tests did to it
+	if err := sim.Reset(); err != nil {
+		t.Fatal(err)
+	}
 	if err := sim.Activate("flap"); err != nil {
 		t.Fatal(err)
 	}

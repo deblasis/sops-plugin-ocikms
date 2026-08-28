@@ -62,8 +62,21 @@ def _flap_fails():
     # persisted in KV so the alternation holds across plugin processes
     return store_kv_incr("kms", "flap") % 2 == 1
 
+_SEED_KEYS = [
+    "ocid1.key.oc1.sim-region.simvault.simkey1",
+    "ocid1.key.oc1.sim-region.simvault.simkey2",
+]
+
 def _find_key(key_id):
-    for doc in store_collection("keys").list():
+    c = store_collection("keys")
+    docs = c.list()
+    if len(docs) == 0:
+        # state reset (dashboard /api/state reset) wipes collections without
+        # re-running seeding; re-materialize so a reset server acts fresh
+        for k in _SEED_KEYS:
+            c.insert({"id": k, "state": "ENABLED"})
+        docs = c.list()
+    for doc in docs:
         if doc.get("id", "") == key_id:
             return doc
     return None

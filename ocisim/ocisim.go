@@ -19,6 +19,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strconv"
+	"sync"
 	"time"
 )
 
@@ -32,8 +35,14 @@ const (
 const bootBudget = 30 * time.Second
 
 // Server is a running `stunt up` serving the OCI KMS adapter.
+//
+// Profiles are service-global server state: every plugin session pointed at
+// Endpoint() shares the active failure mode, so concurrent test sessions
+// would cross-inject. The suite is serial by design; parallel tests must
+// each Start() their own Server.
 type Server struct {
 	cmd      *exec.Cmd
+	done     chan struct{}
 	dir      string
 	endpoint string
 	dashURL  string
@@ -56,17 +65,25 @@ func AdapterDir() (string, error) {
 // Stateful or raw-body modes (flap, garbage, oversized) live in the adapter.
 func manifestProfiles() map[string]string {
 	return map[string]string{
-		"auth-401": `respond: { status: 401, body: { inline: { code: NotAuthenticated, message: simulated auth failure } } }`,
-		"auth-403": `respond: { status: 403, body: { inline: { code: NotAuthorizedOrNotFound, message: simulated forbidden } } }`,
-		"key-gone-404": `respond: { status: 404, body: { inline: { code: NotFound, message: simulated deleted key } } }`,
-		"throttled-429": `respond: { status: 429, headers: { Retry-After: "1" }, body: { inline: { code: TooManyRequests, message: simulated throttling } } }`,
-		"outage-500":   `respond: { status: 500, body: { inline: { code: InternalServerError, message: simulated outage } } }`,
+		"auth-401":        `respond: { status: 401, body: { inline: { code: NotAuthenticated, message: simulated auth failure } } }`,
+		"auth-403":        `respond: { status: 403, body: { inline: { code: NotAuthorizedOrNotFound, message: simulated forbidden } } }`,
+		"key-gone-404":    `respond: { status: 404, body: { inline: { code: NotFound, message: simulated deleted key } } }`,
+		"throttled-429":   `respond: { status: 429, headers: { Retry-After: "1" }, body: { inline: { code: TooManyRequests, message: simulated throttling } } }`,
+		"outage-500":      `respond: { status: 500, body: { inline: { code: InternalServerError, message: simulated outage } } }`,
 		"unavailable-503": `respond: { status: 503, body: { inline: { code: ServiceUnavailable, message: simulated maintenance } } }`,
-		"slow-500-3s":  `respond: { status: 500, latency_ms: 3000, body: { inline: { code: InternalServerError, message: slow failure } } }`,
+		"slow-500-3s":     `respond: { status: 500, latency_ms: 3000, body: { inline: { code: InternalServerError, message: slow failure } } }`,
 		// 45s drop vs the plugin's 30s deadline: the plugin must hit its own
 		// timeout first, which is the boundary under test
 		"hang": `respond: { behavior: timeout, latency_ms: 45000 }`,
 	}
+}
+
+// exeSuffix matches the platform's executable naming for built binaries.
+func exeSuffix() string {
+	if runtime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
 }
 
 // Start boots the simulator: a temp manifest dir, `stunt up` in the
@@ -90,9 +107,17 @@ func Start() (*Server, error) {
 		return nil, err
 	}
 
+	// sorted so the generated manifest is byte-identical across runs; the
+	// Windows drive colon is exactly the kind of plain-scalar trap YAML
+	// quoting exists for
+	names := make([]string, 0)
+	for name := range manifestProfiles() {
+		names = append(names, name)
+	}
+	sort.Strings(names)
 	var prof bytes.Buffer
-	for name, respond := range manifestProfiles() {
-		fmt.Fprintf(&prof, "      %s:\n        description: adversarial injection %s\n        rules:\n          - match: { path: /20180608/** }\n            %s\n", name, name, respond)
+	for _, name := range names {
+		fmt.Fprintf(&prof, "      %s:\n        description: adversarial injection %s\n        rules:\n          - match: { path: /20180608/** }\n            %s\n", name, name, manifestProfiles()[name])
 	}
 	// stunt rejects base_port 0, so borrow an OS-assigned port and hand it
 	// over; the tiny close-to-bind window is the usual testing compromise
@@ -112,7 +137,7 @@ services:
   ocikms:
     adapter: %s
     profiles:
-%s`, port, filepath.ToSlash(adapterDir), prof.String())
+%s`, port, strconv.Quote(filepath.ToSlash(adapterDir)), prof.String())
 	manifestPath := filepath.Join(dir, "stunt.yaml")
 	if err := os.WriteFile(manifestPath, []byte(manifest), 0o644); err != nil {
 		os.RemoveAll(dir)
@@ -121,18 +146,29 @@ services:
 
 	cmd := exec.Command(bin, "up", "--manifest", manifestPath)
 	cmd.Dir = dir
-	// stunt logs to stdout; keep it out of the test output but wired for debugging
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
+	// buffered, not discarded: a boot failure must explain itself
+	var bootLog syncBuffer
+	bootLog.b.Grow(4096)
+	cmd.Stdout = &bootLog
+	cmd.Stderr = &bootLog
 	if err := cmd.Start(); err != nil {
 		os.RemoveAll(dir)
 		return nil, fmt.Errorf("starting stunt: %w", err)
 	}
+	// ProcessState stays nil until Wait, so the poll loop cannot see an early
+	// exit on its own; a Wait goroutine closes done the moment it happens
+	var waitErr error
+	done := make(chan struct{})
+	go func() {
+		waitErr = cmd.Wait()
+		close(done)
+	}()
 
 	s := &Server{
-		cmd: cmd,
-		dir: dir,
-		hc:  &http.Client{Timeout: 10 * time.Second},
+		cmd:  cmd,
+		done: done,
+		dir:  dir,
+		hc:   &http.Client{Timeout: 10 * time.Second},
 	}
 	// if anything below fails, do not leak the process
 	booted := false
@@ -156,12 +192,13 @@ services:
 				break
 			}
 		}
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("stunt did not write a usable runtime file at %s", runtimePath)
+		select {
+		case <-done:
+			return nil, fmt.Errorf("stunt up exited during boot: %v\n%s", waitErr, bootLog.String())
+		default:
 		}
-		// the process may have died with a manifest error; surface that, not a timeout
-		if cmd.ProcessState != nil {
-			return nil, fmt.Errorf("stunt up exited early: %v", cmd.ProcessState)
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("stunt did not write a usable runtime file at %s\n%s", runtimePath, bootLog.String())
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -182,11 +219,36 @@ services:
 				return s, nil
 			}
 		}
+		select {
+		case <-done:
+			return nil, fmt.Errorf("stunt up exited during boot: %v\n%s", waitErr, bootLog.String())
+		default:
+		}
 		if time.Now().After(deadline) {
-			return nil, errors.New("stunt dashboard never became ready")
+			return nil, fmt.Errorf("stunt dashboard never became ready\n%s", bootLog.String())
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// syncBuffer collects the child's output. exec.Cmd copies stdout and stderr
+// from two goroutines, and the harness reads only after Wait completes, but
+// the mutex keeps that contract local instead of load-bearing.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }
 
 // Endpoint is the crypto endpoint to put in the plugin config's
@@ -211,6 +273,34 @@ func (s *Server) Deactivate() error {
 		return errors.New("ocisim: no server (stunt unavailable)")
 	}
 	return s.postProfile(map[string]string{"name": ""})
+}
+
+// Reset wipes the ocikms service state via the dashboard's
+// /api/state/<service>/reset endpoint, the same call `stunt reset ocikms`
+// makes: KV counters (flap parity, the ciphertext sequence) and stored blobs
+// go. v0.52 does not re-run collection seeding on reset; the adapter
+// re-materializes its seed keys lazily, so a reset server behaves like a
+// fresh one. Active profiles are runtime activation state, not adapter
+// state, and survive; pair with Deactivate when a test needs both.
+func (s *Server) Reset() error {
+	if s == nil {
+		return errors.New("ocisim: no server (stunt unavailable)")
+	}
+	req, err := http.NewRequest(http.MethodPost, s.dashURL+"/api/state/ocikms/reset", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-Stunt-Token", s.token)
+	res, err := s.hc.Do(req)
+	if err != nil {
+		return fmt.Errorf("dashboard state reset: %w", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(res.Body)
+		return fmt.Errorf("state reset rejected (%d): %s", res.StatusCode, msg)
+	}
+	return nil
 }
 
 func (s *Server) postProfile(payload map[string]string) error {
@@ -238,9 +328,14 @@ func (s *Server) postProfile(payload map[string]string) error {
 
 // Close kills the stunt process and drops its state directory.
 func (s *Server) Close() error {
+	if s == nil {
+		return nil
+	}
 	if s.cmd.Process != nil {
 		_ = s.cmd.Process.Kill()
-		_ = s.cmd.Wait()
+		// the boot goroutine owns Wait; a second Wait here races on Cmd
+		// internals, so just wait for it to finish reaping
+		<-s.done
 	}
 	return os.RemoveAll(s.dir)
 }
