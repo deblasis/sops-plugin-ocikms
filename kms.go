@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"os"
 	"strings"
 
 	"github.com/deblasis/sops-plugin-ocikms/ociconfig"
@@ -88,13 +90,25 @@ type blob struct {
 // KMSHandler implements protocol.Handler against OCI KMS.
 type KMSHandler struct {
 	// Fake replaces the network KMS with an in-process wrap (testing hook,
-	// enabled by SOPS_OCIKMS_FAKE_KMS=1 in main). Conformance verify runs
-	// encrypts with an empty config, so fake mode defaults the key material
-	// instead of failing config validation.
+	// enabled by SOPS_OCIKMS_FAKE_KMS=1 in main). Fake mode always forces
+	// the fake key id and endpoint, even when config carries real values,
+	// so a fake blob is distinguishable by its key_ref and never
+	// masquerades as a real OCID; every fake wrap also warns on stderr.
 	Fake bool
+	// WarnWriter receives the fake-mode warning; nil means os.Stderr.
+	// Tests inject io.Discard.
+	WarnWriter io.Writer
 	// newClient builds the KMS shim for a crypto endpoint; swappable in
 	// tests. Nil means the real client.
 	newClient func(ctx context.Context, cryptoEndpoint string) (kmsAPI, error)
+}
+
+func (h *KMSHandler) warnFake() {
+	w := h.WarnWriter
+	if w == nil {
+		w = os.Stderr
+	}
+	fmt.Fprintln(w, "sops-plugin-ocikms: FAKE KMS (SOPS_OCIKMS_FAKE_KMS=1): using the in-process fake, not real OCI KMS; output is NOT encrypted")
 }
 
 func (h *KMSHandler) client(ctx context.Context, endpoint string) (kmsAPI, error) {
@@ -134,12 +148,9 @@ func (h *KMSHandler) Encrypt(config map[string]any, plaintext []byte) (string, s
 	keyID, _ := config["key_id"].(string)
 	endpoint, _ := config["crypto_endpoint"].(string)
 	if h.Fake {
-		if keyID == "" {
-			keyID = fakeKeyID
-		}
-		if endpoint == "" {
-			endpoint = fakeEndpoint
-		}
+		keyID = fakeKeyID
+		endpoint = fakeEndpoint
+		h.warnFake()
 	} else if keyID == "" || endpoint == "" {
 		return "", "", &WireError{Code: CodeConfigError, Message: "config requires string fields key_id and crypto_endpoint"}
 	}
@@ -180,6 +191,7 @@ func (h *KMSHandler) Decrypt(wrapped string) ([]byte, error) {
 	}
 
 	if h.Fake {
+		h.warnFake()
 		plaintext, err := fakeOpen(b.KeyID, b.CiphertextB64)
 		if err != nil {
 			return nil, &WireError{Code: CodeInvalidRequest, Message: "wrapped blob does not open: " + err.Error()}
@@ -213,7 +225,10 @@ func classify(err error) *WireError {
 	if err == nil {
 		return &WireError{Code: CodeInternal, Message: "classify called with nil error"}
 	}
-	if se, ok := common.IsServiceError(err); ok {
+	// errors.As, not common.IsServiceError: the call sites wrap with %w, and
+	// IsServiceError is a bare type assertion that stops at the first wrap
+	var se common.ServiceError
+	if errors.As(err, &se) {
 		msg := se.GetMessage()
 		if msg == "" {
 			msg = se.GetCode()

@@ -174,10 +174,12 @@ func dispatch(h Handler, line []byte) response {
 	}
 }
 
-// readLine returns one line without its LF. CRLF is forbidden by the spec;
-// the trailing CR is left in place so JSON parsing rejects it downstream.
-// Trailing bytes without a terminator mean the host died mid-write: treated
-// as end of stream, never as a complete request.
+// readLine returns one line without its LF. Inbound CRLF is accepted
+// leniently: a trailing CR is valid JSON whitespace, so json.Unmarshal
+// downstream tolerates it. The spec's CR prohibition governs what the
+// plugin EMITS (see writeLine); this plugin never writes CR. Trailing bytes
+// without a terminator mean the host died mid-write: treated as end of
+// stream, never as a complete request.
 func readLine(r *bufio.Reader) ([]byte, error) {
 	line, err := r.ReadSlice('\n')
 	if errors.Is(err, bufio.ErrBufferFull) {

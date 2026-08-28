@@ -56,8 +56,12 @@ Check protocol conformance against your sops build:
 Without OCI credentials the real encrypt/decrypt cannot run, so set
 `SOPS_OCIKMS_FAKE_KMS=1`: the plugin then uses an in-process fake KMS
 (SHA-256 keystream XOR, NOT cryptography, never for real secrets) instead of
-the network. This env var exists only as a testing hook; without it the plugin
-always talks to real OCI KMS.
+the network. Fake mode is loud and distinguishable: it always wraps under a
+fixed fake key id and endpoint (`ocid1.key.oc1.fake-region.fakevault.fakekey`),
+ignoring whatever the config carries, so a fake blob is identifiable by its
+key_ref and never masquerades as a real OCID; and it prints a one-line warning
+to stderr on every fake wrap and unwrap. This env var exists only as a testing
+hook; without it the plugin always talks to real OCI KMS.
 
 ## Credentials at runtime
 

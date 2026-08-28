@@ -32,9 +32,11 @@ const (
 	OCIPrivateKeyPath = "OCI_private_key_path"
 )
 
-// Home directories. Both must be redirected when tests isolate the default
-// config file lookup: the SDK resolves the home directory via HOME on POSIX
-// and USERPROFILE on Windows.
+// Home directories. The SDK resolves the home folder via user.Current()
+// FIRST and only falls back to these env vars, and user.Current() ignores
+// them on Windows; that is why isolating HOME/USERPROFILE alone is not
+// sufficient to fence off a real host ~/.oci/config, and the default-file
+// chain test skips when one exists.
 const (
 	// HomeEnv is the HOME environment variable
 	HomeEnv = "HOME"

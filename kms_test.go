@@ -1,6 +1,7 @@
 package ocikms
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -54,7 +55,7 @@ func spanProbe() []byte {
 }
 
 func TestBlobRoundTripFakeMode(t *testing.T) {
-	h := &KMSHandler{Fake: true}
+	h := &KMSHandler{Fake: true, WarnWriter: io.Discard}
 	config := map[string]any{
 		"key_id":          "ocid1.key.oc1.eu-frankfurt-1.vault1.key1",
 		"crypto_endpoint": "https://vault1-crypto.kms.eu-frankfurt-1.oraclecloud.com",
@@ -64,8 +65,10 @@ func TestBlobRoundTripFakeMode(t *testing.T) {
 		if err != nil {
 			t.Fatalf("encrypt: %v", err)
 		}
-		if keyRef != config["key_id"] {
-			t.Fatalf("key_ref = %q, want the key OCID", keyRef)
+		// fake mode forces its own key, so a fake blob is always
+		// distinguishable by key_ref
+		if keyRef != fakeKeyID {
+			t.Fatalf("key_ref = %q, want the forced fake key %q", keyRef, fakeKeyID)
 		}
 		if !strings.HasPrefix(wrapped, "ocikms.v1.") {
 			t.Fatalf("wrapped blob %q lacks the version prefix", wrapped)
@@ -83,8 +86,10 @@ func TestBlobRoundTripFakeMode(t *testing.T) {
 	}
 }
 
+// TestBlobCarriesRoutingFields runs on a non-fake handler with a scripted
+// client so the config's real key id and endpoint ride inside the blob.
 func TestBlobCarriesRoutingFields(t *testing.T) {
-	h := &KMSHandler{Fake: true}
+	h := handlerWithClient(fakeKMS{}, nil)
 	wrapped, _, err := h.Encrypt(map[string]any{
 		"key_id":          "ocid1.key.oc1.uk-london-1.vaultx.keyx",
 		"crypto_endpoint": "https://vaultx-crypto.kms.uk-london-1.oraclecloud.com",
@@ -111,14 +116,54 @@ func TestBlobCarriesRoutingFields(t *testing.T) {
 func TestFakeModeDefaultsEmptyConfig(t *testing.T) {
 	// sops plugins verify encrypts with no config at all; fake mode must
 	// still produce a working round trip
-	h := &KMSHandler{Fake: true}
-	wrapped, _, err := h.Encrypt(nil, rampProbe())
+	h := &KMSHandler{Fake: true, WarnWriter: io.Discard}
+	wrapped, keyRef, err := h.Encrypt(nil, rampProbe())
 	if err != nil {
 		t.Fatal(err)
+	}
+	if keyRef != fakeKeyID {
+		t.Fatalf("key_ref = %q, want %q", keyRef, fakeKeyID)
 	}
 	back, err := h.Decrypt(wrapped)
 	if err != nil || string(back) != string(rampProbe()) {
 		t.Fatalf("round trip: %v", err)
+	}
+}
+
+func TestFakeModeForcesFakeKeyEvenWithRealConfig(t *testing.T) {
+	h := &KMSHandler{Fake: true, WarnWriter: io.Discard}
+	real := "ocid1.key.oc1.eu-frankfurt-1.realvault.realkey"
+	wrapped, keyRef, err := h.Encrypt(map[string]any{
+		"key_id":          real,
+		"crypto_endpoint": "https://realvault-crypto.kms.eu-frankfurt-1.oraclecloud.com",
+	}, rampProbe())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keyRef == real || keyRef != fakeKeyID {
+		t.Fatalf("key_ref = %q, fake mode must never report a real OCID", keyRef)
+	}
+	payload, _ := base64.StdEncoding.DecodeString(strings.TrimPrefix(wrapped, BlobPrefix))
+	var b blob
+	json.Unmarshal(payload, &b)
+	if b.KeyID != fakeKeyID || b.CryptoEndpoint != fakeEndpoint {
+		t.Fatalf("blob must carry the fake key/endpoint, got %+v", b)
+	}
+}
+
+func TestFakeModeWarnsOnStderr(t *testing.T) {
+	var buf bytes.Buffer
+	h := &KMSHandler{Fake: true, WarnWriter: &buf}
+	wrapped, _, err := h.Encrypt(nil, rampProbe())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.Decrypt(wrapped); err != nil {
+		t.Fatal(err)
+	}
+	warned := strings.Count(buf.String(), "FAKE KMS")
+	if warned != 2 {
+		t.Fatalf("want one warning per fake operation (2), got %d: %q", warned, buf.String())
 	}
 }
 
@@ -139,7 +184,7 @@ func TestRealModeRequiresConfig(t *testing.T) {
 }
 
 func TestDecryptRejectsForeignAndCorruptBlobs(t *testing.T) {
-	h := &KMSHandler{Fake: true}
+	h := &KMSHandler{Fake: true, WarnWriter: io.Discard}
 	for _, wrapped := range []string{
 		"",
 		"sops-conformance-bogus.v1.!!!!!",
@@ -157,7 +202,7 @@ func TestDecryptRejectsForeignAndCorruptBlobs(t *testing.T) {
 }
 
 func TestEncryptRejectsEmptyPlaintext(t *testing.T) {
-	h := &KMSHandler{Fake: true}
+	h := &KMSHandler{Fake: true, WarnWriter: io.Discard}
 	if _, _, err := h.Encrypt(map[string]any{"key_id": "k", "crypto_endpoint": "e"}, nil); err == nil {
 		t.Fatal("empty plaintext must fail")
 	} else if wireErr(t, err).Code != CodeInvalidRequest {
@@ -165,18 +210,29 @@ func TestEncryptRejectsEmptyPlaintext(t *testing.T) {
 	}
 }
 
-// fakeAPI scripts client-level behavior for the mapping tests.
+// fakeAPI scripts client-level behavior for the mapping tests. Errors are
+// wrapped exactly like realKMS wraps them (%w through fmt.Errorf), so the
+// classification tests run through the same wrapping the real path produces;
+// a classifier that stopped at the first wrap would fail here too.
 type fakeAPI struct {
 	encrypt func(ctx context.Context, keyID, ptB64 string) (string, error)
 	decrypt func(ctx context.Context, keyID, ctB64 string) (string, error)
 }
 
 func (f fakeAPI) Encrypt(ctx context.Context, keyID, ptB64 string) (string, error) {
-	return f.encrypt(ctx, keyID, ptB64)
+	ct, err := f.encrypt(ctx, keyID, ptB64)
+	if err != nil {
+		return "", fmt.Errorf("failed to encrypt sops data key with OCI KMS key: %w", err)
+	}
+	return ct, nil
 }
 
 func (f fakeAPI) Decrypt(ctx context.Context, keyID, ctB64 string) (string, error) {
-	return f.decrypt(ctx, keyID, ctB64)
+	pt, err := f.decrypt(ctx, keyID, ctB64)
+	if err != nil {
+		return "", fmt.Errorf("failed to decrypt sops data key with OCI KMS key: %w", err)
+	}
+	return pt, nil
 }
 
 // svcErr implements common.ServiceError so classify sees a real SDK shape.
