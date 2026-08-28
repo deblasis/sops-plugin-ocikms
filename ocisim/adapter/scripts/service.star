@@ -71,16 +71,29 @@ _SEED_KEYS = [
     "ocid1.key.oc1.sim-region.simvault.simkey2",
 ]
 
+# Synthetic P-256 key, entropy faucet only: ECDSA signatures draw their nonce
+# from the host's crypto/rand, so signing the same string twice yields two
+# different signatures. Signs nothing, guards nothing.
+_MINT_KEY = """-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgJxd+FjJ95yhhWRTA
+TuNMZAJjXzG1pLwZllBuHmyIT7+hRANCAAQ3eS38Nu+TIxlCzRE8k2E8/eGdpERB
+GGtdgkMShf2rsuCo1GopDFz6ajQDVf9EGtruOsCYhklUqayU9ixyCRTr
+-----END PRIVATE KEY-----"""
+
 def _world():
     # ciphertext names embed a world generation. Reset clears collections, so
     # the world doc vanishes and a fresh gen is minted: pre-reset ciphertexts
     # then 404 even if their KV entries somehow survived the reset, and the
-    # rewound seq counter cannot collide with old names.
+    # rewound seq counter cannot collide with old names. The mint mixes the
+    # randomized ECDSA signature (real entropy, so back-to-back mints in the
+    # same wall-clock second still diverge) with clock+seq as fallback
+    # sources in case signing ever turns deterministic.
     c = store_collection("world")
     doc = c.get("world")
     if doc == None:
         seq = store_kv_incr("kms", "seq")
-        gen = crypto.sha256(str(clock.now_unix()) + ":" + str(seq))[:12]
+        sig = crypto.ecdsa_sign_p256(_MINT_KEY, str(clock.now_unix()) + ":" + str(seq))
+        gen = sig[:16]
         c.insert({"id": "world", "gen": gen})
         return gen
     return doc.get("gen", "")

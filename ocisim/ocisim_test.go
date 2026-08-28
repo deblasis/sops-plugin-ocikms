@@ -292,6 +292,37 @@ func TestResetInvalidatesOldCiphertexts(t *testing.T) {
 	}
 }
 
+// TestResetMintEntropyBackToBack is the colliding order: encrypt, Reset,
+// encrypt immediately, then decrypt the PRE-reset blob, with no sleep, so
+// both generation mints land inside the same wall-clock second. The mint
+// must carry real entropy; a time+seq hash alone collides here and would
+// resurrect the pre-reset plaintext.
+func TestResetMintEntropyBackToBack(t *testing.T) {
+	requireSim(t)
+	s := startPlugin(t)
+	for i := 0; i < 5; i++ {
+		pre := s.do(encryptReq(int64(4*i+1), Key1, sim.Endpoint(), []byte(fmt.Sprintf("pre-%d", i))))
+		if !pre.OK {
+			t.Fatalf("iteration %d: encrypt: %+v", i, pre.Error)
+		}
+		if err := sim.Reset(); err != nil {
+			t.Fatalf("iteration %d: %v", i, err)
+		}
+		post := s.do(encryptReq(int64(4*i+2), Key1, sim.Endpoint(), []byte(fmt.Sprintf("post-%d", i))))
+		if !post.OK {
+			t.Fatalf("iteration %d: fresh encrypt after reset: %+v", i, post.Error)
+		}
+		if post.Wrapped == pre.Wrapped {
+			t.Fatalf("iteration %d: generation collision, identical wrapped blobs %q", i, pre.Wrapped)
+		}
+		wantCode(t, s.do(decryptReq(int64(4*i+3), pre.Wrapped)), "key_unavailable")
+		back := s.do(decryptReq(int64(4*i+4), post.Wrapped))
+		if !back.OK || string(back.Plaintext) != fmt.Sprintf("post-%d", i) {
+			t.Fatalf("iteration %d: post-reset round trip: ok=%v %+v", i, back.OK, back.Error)
+		}
+	}
+}
+
 // TestDecryptBindsCiphertextToKey: the simulator binds each ciphertext to its
 // key, so a blob whose keyId was swapped after encrypt must not decrypt.
 func TestDecryptBindsCiphertextToKey(t *testing.T) {
