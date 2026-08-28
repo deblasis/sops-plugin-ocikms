@@ -85,6 +85,24 @@ key_id/crypto_endpoint in config -> config_error, anything else -> internal.
 
 Requires Go 1.25 or newer.
 
+## OCI KMS simulator (ocisim)
+
+`ocisim/` is an adversarial test stand-in for OCI KMS, built as a
+[stunt](https://github.com/stuntapi/stunt) adapter (`go install
+stuntapi.com/stunt/cmd/stunt@latest`). The `ocisim` package boots the adapter
+on a loopback port and flips failure modes over stunt's dashboard HTTP API, so
+Go tests drive injection programmatically. `go test ./ocisim/` runs the real
+plugin binary (fake mode OFF) against it: signed requests, stateful
+encrypt/decrypt round trips, multiple keys, unknown-key 404s, and failure
+injection (auth-401, auth-403, key-gone-404, throttled-429 with Retry-After,
+outage-500, unavailable-503, flap, garbage 200s, oversized payloads,
+slow-500-3s, hang). The 30s hang boundary test runs only with OCISIM_SLOW=1.
+
+Auth is stub-level: request signatures are accepted but never validated, so
+401/403 come from profiles, not signature checks. Known key OCIDs are
+`ocid1.key.oc1.sim-region.simvault.simkey1` and `...simkey2`. Tests skip when
+the stunt binary is absent (STUNT_BIN overrides the PATH lookup).
+
 ## License
 
 MPL-2.0, see LICENSE. The ported provider logic derives from

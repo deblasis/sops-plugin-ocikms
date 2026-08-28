@@ -1,0 +1,50 @@
+# stunt adapter manifest - OCI Key Management-style crypto endpoint simulator
+# (unofficial, synthetic data only). Adversarial testing stand-in for this
+# plugin; request signatures are accepted but never verified.
+id: oci-kms-style
+name: "Oracle Cloud Infrastructure Key Management-style API simulator (unofficial)"
+version: "0.1.0"
+
+api:
+  name: "OCI Key Management Crypto API"
+  version: "20180608"
+
+# the two calls the plugin makes, both POST JSON on the crypto endpoint
+endpoints:
+  - route: /20180608/encrypt
+    method: POST
+    handler: scripts/service.star#on_encrypt
+  - route: /20180608/decrypt
+    method: POST
+    handler: scripts/service.star#on_decrypt
+
+# keys known to the simulator; encrypt/decrypt against any other OCID is 404
+resources:
+  - name: keys
+    kind: collection
+    seed: fixtures/keys.jsonl
+
+# auth is stub-level on purpose: the plugin's tests need real SDK-signed
+# requests to pass, not real auth decisions. 401/403 come from profiles.
+identity:
+  token_scheme: none
+
+# handler-implemented degraded modes (manifest rule bundles cover the plain
+# status injections; these need state or raw bodies):
+#   flap      alternate calls fail 500 then succeed, counter persists
+#   garbage   200 whose body is not JSON
+#   oversized 200 whose ciphertext field blows past the 1 MiB protocol cap
+profiles:
+  flap: "alternate calls fail 500 then succeed"
+  garbage: "200 responses whose body is not valid JSON"
+  oversized: "200 responses with a >1MiB ciphertext field"
+
+rules:
+  - name: catchall-404
+    match: { path: "/**" }
+    respond:
+      status: 404
+      body:
+        inline:
+          code: NotFound
+          message: "no such route"
