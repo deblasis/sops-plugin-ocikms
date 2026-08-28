@@ -38,7 +38,7 @@ func (s *stubHandler) Decrypt(wrapped string) ([]byte, error) {
 type session struct {
 	t    *testing.T
 	inW  io.Writer
-	outR io.Reader
+	dec  *json.Decoder
 	done chan error
 }
 
@@ -46,23 +46,30 @@ func newSession(t *testing.T, h Handler) *session {
 	t.Helper()
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
-	s := &session{t: t, inW: inW, outR: outR, done: make(chan error, 1)}
+	s := &session{t: t, inW: inW, dec: json.NewDecoder(outR), done: make(chan error, 1)}
 	go func() { s.done <- Serve(inR, outW, h, "9.9.9-test") }()
 	return s
 }
 
 func (s *session) send(line string) {
 	s.t.Helper()
-	if _, err := s.inW.Write([]byte(line + "\n")); err != nil {
+	s.write(line + "\n")
+}
+
+// write sends a raw frame; used where the terminator is deliberately not a
+// bare LF (CRLF tolerance).
+func (s *session) write(frame string) {
+	s.t.Helper()
+	if _, err := s.inW.Write([]byte(frame)); err != nil {
 		s.t.Fatalf("send: %v", err)
 	}
 }
 
+// read decodes the next response from the session's shared decoder.
 func (s *session) read() map[string]any {
 	s.t.Helper()
-	dec := json.NewDecoder(s.outR)
 	var v map[string]any
-	if err := dec.Decode(&v); err != nil {
+	if err := s.dec.Decode(&v); err != nil {
 		s.t.Fatalf("reading response: %v", err)
 	}
 	return v
@@ -257,4 +264,84 @@ func base64Of(s string) string {
 	var out string
 	json.Unmarshal(b, &out)
 	return out
+}
+
+func TestHandshakeRejectsOldMaxVersion(t *testing.T) {
+	err := Serve(
+		strings.NewReader("{\"protocol\":\"sops-plugin\",\"max_version\":0}\n"),
+		io.Discard, &stubHandler{}, "0.1.0")
+	if err == nil || !strings.Contains(err.Error(), "max_version") {
+		t.Fatalf("want max_version rejection, got %v", err)
+	}
+}
+
+// failWriter accepts n writes, then errors: simulates stdout dying mid-session.
+type failWriter struct {
+	n       int
+	written int
+}
+
+func (w *failWriter) Write(p []byte) (int, error) {
+	w.written++
+	if w.written > w.n {
+		return 0, errors.New("stdout broken")
+	}
+	return len(p), nil
+}
+
+func TestWriteFailureEndsServe(t *testing.T) {
+	input := "{\"protocol\":\"sops-plugin\",\"max_version\":1}\n" +
+		"{\"id\":1,\"action\":\"encrypt\",\"config\":{},\"plaintext\":\"QUJD\"}\n"
+	cases := []struct {
+		name      string
+		after     int
+		wantInErr string
+	}{
+		{"handshake write fails", 0, "handshake response"},
+		{"first response write fails", 1, "writing response"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := Serve(strings.NewReader(input), &failWriter{n: tc.after},
+				&stubHandler{wrapped: "w"}, "0.1.0")
+			if err == nil || !strings.Contains(err.Error(), tc.wantInErr) {
+				t.Fatalf("want %q error, got %v", tc.wantInErr, err)
+			}
+		})
+	}
+}
+
+func TestExactBoundaryLineAccepted(t *testing.T) {
+	// a line of exactly maxLineSize bytes INCLUDING the LF is the legal cap
+	prefix := `{"id":1,"action":"decrypt","wrapped":"`
+	suffix := `"}`
+	filler := maxLineSize - 1 - len(prefix) - len(suffix)
+	line := prefix + strings.Repeat("A", filler) + suffix
+	if len(line) != maxLineSize-1 {
+		t.Fatalf("line is %d bytes, want %d", len(line), maxLineSize-1)
+	}
+	input := "{\"protocol\":\"sops-plugin\",\"max_version\":1}\n" + line + "\n"
+	var buf bytes.Buffer
+	err := Serve(strings.NewReader(input), &buf, &stubHandler{plaintext: []byte("x")}, "0.1.0")
+	if err != nil {
+		t.Fatalf("boundary line must be accepted, got %v", err)
+	}
+	if n := strings.Count(buf.String(), "\n"); n != 2 {
+		t.Fatalf("want 2 response lines, got %d", n)
+	}
+}
+
+func TestInboundCRLFTolerated(t *testing.T) {
+	// the host never sends CRLF, but a trailing CR is JSON whitespace; the
+	// reader is lenient and the exchange still works
+	h := &stubHandler{wrapped: "ocikms.v1.QUJD", plaintext: []byte("recovered")}
+	s := newSession(t, h)
+	defer s.close()
+	s.write("{\"protocol\":\"sops-plugin\",\"max_version\":1}\r\n")
+	s.read()
+	s.write("{\"id\":4,\"action\":\"encrypt\",\"config\":{\"key_id\":\"k\"},\"plaintext\":\"c2VjcmV0\"}\r\n")
+	resp := s.read()
+	if resp["id"] != float64(4) || resp["ok"] != true || resp["wrapped"] != "ocikms.v1.QUJD" {
+		t.Fatalf("CRLF-terminated request was not answered: %v", resp)
+	}
 }

@@ -78,7 +78,15 @@ OCI failure to frozen protocol code: 401/403 -> auth_failed, 404/429/5xx and
 network timeouts -> key_unavailable, 400 -> invalid_request, missing
 key_id/crypto_endpoint in config -> config_error, anything else -> internal.
 
+## Development
+
+    go test ./... -race -count=1
+    go build -ldflags "-X main.pluginVersion=1.2.3" -o sops-plugin-ocikms ./cmd/sops-plugin-ocikms
+
+Requires Go 1.25 or newer.
+
 ## License
 
-The ported provider logic derives from sops (MPL-2.0). The OCI Go SDK is dual
-licensed UPL-1.0 / Apache-2.0.
+MPL-2.0, see LICENSE. The ported provider logic derives from
+getsops/sops PR #1226 (MPL-2.0). The OCI Go SDK is dual licensed
+UPL-1.0 / Apache-2.0.

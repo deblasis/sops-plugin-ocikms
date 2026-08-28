@@ -113,12 +113,14 @@ func Serve(in io.Reader, out io.Writer, h Handler, pluginVersion string) error {
 	if hs.MaxVersion < protocolVersion {
 		return fmt.Errorf("host max_version %d is older than protocol version %d", hs.MaxVersion, protocolVersion)
 	}
-	writeLine(w, handshakeOut{
+	if err := writeLine(w, handshakeOut{
 		Protocol:      protocolName,
 		Version:       protocolVersion,
 		Plugin:        PluginName,
 		PluginVersion: pluginVersion,
-	})
+	}); err != nil {
+		return fmt.Errorf("writing handshake response: %w", err)
+	}
 
 	for {
 		line, err := readLine(r)
@@ -128,7 +130,10 @@ func Serve(in io.Reader, out io.Writer, h Handler, pluginVersion string) error {
 		if err != nil {
 			return err
 		}
-		writeLine(w, dispatch(h, line))
+		if err := writeLine(w, dispatch(h, line)); err != nil {
+			// a dead stdout must end the loop, not spin answering nothing
+			return fmt.Errorf("writing response: %w", err)
+		}
 	}
 }
 
@@ -194,15 +199,19 @@ func readLine(r *bufio.Reader) ([]byte, error) {
 	return line[:len(line)-1], nil
 }
 
-func writeLine(w *bufio.Writer, v any) {
+func writeLine(w *bufio.Writer, v any) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		// only reachable with unmarshalable handler values; never on the
 		// fixed-shape handshake responses
 		b = []byte(fmt.Sprintf(`{"id":0,"ok":false,"error":{"code":"internal","message":%q}}`, err.Error()))
 	}
-	w.Write(b)
-	w.WriteByte('\n')
+	if _, err := w.Write(b); err != nil {
+		return err
+	}
+	if err := w.WriteByte('\n'); err != nil {
+		return err
+	}
 	// the spec's hang bug: every response is flushed before reading on
-	w.Flush()
+	return w.Flush()
 }

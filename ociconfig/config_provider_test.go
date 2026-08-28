@@ -331,3 +331,49 @@ func TestLazyProviderDefersFactory(t *testing.T) {
 		t.Fatalf("factory ran %d times, want exactly once (sync.Once)", called)
 	}
 }
+
+// stubIPProvider stands in for the instance-principal provider with known
+// values for every method.
+type stubIPProvider struct{}
+
+func (stubIPProvider) TenancyOCID() (string, error)            { return "stub-tenancy", nil }
+func (stubIPProvider) UserOCID() (string, error)               { return "stub-user", nil }
+func (stubIPProvider) KeyFingerprint() (string, error)         { return "stub-fingerprint", nil }
+func (stubIPProvider) Region() (string, error)                 { return "stub-region", nil }
+func (stubIPProvider) KeyID() (string, error)                  { return "stub-keyid", nil }
+func (stubIPProvider) PrivateRSAKey() (*rsa.PrivateKey, error) { return nil, nil }
+func (stubIPProvider) AuthType() (common.AuthConfig, error)    { return common.AuthConfig{}, nil }
+
+// TestLazyProviderDelegatesAllMethods exercises all seven delegation paths,
+// not just the two the error test touches.
+func TestLazyProviderDelegatesAllMethods(t *testing.T) {
+	called := 0
+	l := &lazyConfigurationProvider{factory: func() (common.ConfigurationProvider, error) {
+		called++
+		return stubIPProvider{}, nil
+	}}
+	if v, err := l.TenancyOCID(); err != nil || v != "stub-tenancy" {
+		t.Fatalf("TenancyOCID = %q, %v", v, err)
+	}
+	if v, err := l.UserOCID(); err != nil || v != "stub-user" {
+		t.Fatalf("UserOCID = %q, %v", v, err)
+	}
+	if v, err := l.KeyFingerprint(); err != nil || v != "stub-fingerprint" {
+		t.Fatalf("KeyFingerprint = %q, %v", v, err)
+	}
+	if v, err := l.Region(); err != nil || v != "stub-region" {
+		t.Fatalf("Region = %q, %v", v, err)
+	}
+	if v, err := l.KeyID(); err != nil || v != "stub-keyid" {
+		t.Fatalf("KeyID = %q, %v", v, err)
+	}
+	if k, err := l.PrivateRSAKey(); err != nil || k != nil {
+		t.Fatalf("PrivateRSAKey = %v, %v", k, err)
+	}
+	if _, err := l.AuthType(); err != nil {
+		t.Fatalf("AuthType: %v", err)
+	}
+	if called != 1 {
+		t.Fatalf("factory ran %d times, want exactly once (sync.Once)", called)
+	}
+}

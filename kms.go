@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/deblasis/sops-plugin-ocikms/ociconfig"
 	"github.com/oracle/oci-go-sdk/v65/common"
@@ -25,12 +26,16 @@ type kmsAPI interface {
 	Decrypt(ctx context.Context, keyID, ciphertextB64 string) (plaintextB64 string, err error)
 }
 
-// realKMS wraps a KmsCryptoClient. The Encrypt/Decrypt bodies are ported from
-// the sops OCI KMS provider (PR #1226, ocikms/keysource.go) minus the sops
+// realKMS wraps a KmsCryptoClient. The Encrypt/Decrypt bodies are ported
+// from getsops/sops PR #1226 (MPL-2.0), ocikms/keysource.go, minus the sops
 // MasterKey bookkeeping.
 type realKMS struct {
 	client keymanagement.KmsCryptoClient
 }
+
+// errNoCredentials marks a failure to find any usable auth material in the
+// environment/instance/config chain; classify maps it to auth_failed.
+var errNoCredentials = errors.New("no usable OCI credentials in environment/instance/config chain")
 
 func newRealKMS(ctx context.Context, cryptoEndpoint string) (*realKMS, error) {
 	cfg, err := ociconfig.ConfigurationProvider()
@@ -40,7 +45,7 @@ func newRealKMS(ctx context.Context, cryptoEndpoint string) (*realKMS, error) {
 	// force the credential chain now so "no credentials" is an auth error,
 	// not a per-request mystery
 	if _, err := cfg.KeyID(); err != nil {
-		return nil, fmt.Errorf("no usable OCI credentials in environment/instance/config chain: %w", err)
+		return nil, fmt.Errorf("%w: %w", errNoCredentials, err)
 	}
 	client, err := keymanagement.NewKmsCryptoClientWithConfigurationProvider(cfg, cryptoEndpoint)
 	if err != nil {
@@ -80,6 +85,11 @@ func (k *realKMS) Decrypt(ctx context.Context, keyID, ciphertextB64 string) (str
 // the ocikms.v1. prefix. Decrypt works from the blob alone: it carries
 // everything needed to reach the key again, credentials come from the
 // runtime environment.
+//
+// Wire-compatibility policy: ADDING fields is safe (both sides ignore
+// unknown JSON fields); renaming or removing fields is not, and neither is
+// any payload format change. A breaking change requires a new prefix
+// (ocikms.v2), with v1 blobs still decryptable.
 type blob struct {
 	KeyID          string `json:"keyId"`
 	CryptoEndpoint string `json:"cryptoEndpoint"`
@@ -98,9 +108,24 @@ type KMSHandler struct {
 	// WarnWriter receives the fake-mode warning; nil means os.Stderr.
 	// Tests inject io.Discard.
 	WarnWriter io.Writer
+	// RequestTimeout bounds each KMS call; zero means the 30s default.
+	// The SDK's own default is 60s, too long for a stalled CI run.
+	RequestTimeout time.Duration
 	// newClient builds the KMS shim for a crypto endpoint; swappable in
 	// tests. Nil means the real client.
 	newClient func(ctx context.Context, cryptoEndpoint string) (kmsAPI, error)
+}
+
+// defaultRequestTimeout bounds one backend call. The host's own request
+// timeout is 30s by default, so a plugin that hangs longer just gets killed;
+// answering key_unavailable at 30s is friendlier than dying silently.
+const defaultRequestTimeout = 30 * time.Second
+
+func (h *KMSHandler) timeout() time.Duration {
+	if h.RequestTimeout > 0 {
+		return h.RequestTimeout
+	}
+	return defaultRequestTimeout
 }
 
 func (h *KMSHandler) warnFake() {
@@ -155,11 +180,15 @@ func (h *KMSHandler) Encrypt(config map[string]any, plaintext []byte) (string, s
 		return "", "", &WireError{Code: CodeConfigError, Message: "config requires string fields key_id and crypto_endpoint"}
 	}
 
-	c, err := h.client(context.Background(), endpoint)
+	// a fresh client per request is fine for sops' usage (one key operation
+	// per process lifetime); cache per endpoint if you ever batch
+	ctx, cancel := context.WithTimeout(context.Background(), h.timeout())
+	defer cancel()
+	c, err := h.client(ctx, endpoint)
 	if err != nil {
 		return "", "", classify(err)
 	}
-	ctB64, err := c.Encrypt(context.Background(), keyID, base64.StdEncoding.EncodeToString(plaintext))
+	ctB64, err := c.Encrypt(ctx, keyID, base64.StdEncoding.EncodeToString(plaintext))
 	if err != nil {
 		return "", "", classify(err)
 	}
@@ -202,11 +231,13 @@ func (h *KMSHandler) Decrypt(wrapped string) ([]byte, error) {
 		return nil, &WireError{Code: CodeInvalidRequest, Message: "wrapped blob is missing cryptoEndpoint"}
 	}
 
-	c, err := h.client(context.Background(), b.CryptoEndpoint)
+	ctx, cancel := context.WithTimeout(context.Background(), h.timeout())
+	defer cancel()
+	c, err := h.client(ctx, b.CryptoEndpoint)
 	if err != nil {
 		return nil, classify(err)
 	}
-	ptB64, err := c.Decrypt(context.Background(), b.KeyID, b.CiphertextB64)
+	ptB64, err := c.Decrypt(ctx, b.KeyID, b.CiphertextB64)
 	if err != nil {
 		return nil, classify(err)
 	}
@@ -222,9 +253,6 @@ func (h *KMSHandler) Decrypt(wrapped string) ([]byte, error) {
 // missing/throttled/unreachable backend -> key_unavailable; undecodable
 // service input -> invalid_request; anything else is ours -> internal.
 func classify(err error) *WireError {
-	if err == nil {
-		return &WireError{Code: CodeInternal, Message: "classify called with nil error"}
-	}
 	// errors.As, not common.IsServiceError: the call sites wrap with %w, and
 	// IsServiceError is a bare type assertion that stops at the first wrap
 	var se common.ServiceError
@@ -250,12 +278,12 @@ func classify(err error) *WireError {
 			return &WireError{Code: CodeInternal, Message: fmt.Sprintf("OCI KMS error (%d): %s", code, msg)}
 		}
 	}
+	if errors.Is(err, errNoCredentials) {
+		return &WireError{Code: CodeAuthFailed, Message: err.Error()}
+	}
 	var netErr net.Error
 	if errors.As(err, &netErr) || errors.Is(err, context.DeadlineExceeded) {
 		return &WireError{Code: CodeKeyUnavailable, Message: "OCI KMS endpoint unreachable: " + err.Error()}
-	}
-	if strings.Contains(err.Error(), "credentials") || strings.Contains(err.Error(), "configuration provider") {
-		return &WireError{Code: CodeAuthFailed, Message: err.Error()}
 	}
 	return &WireError{Code: CodeInternal, Message: err.Error()}
 }

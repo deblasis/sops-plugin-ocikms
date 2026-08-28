@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // wireErr asserts err carries the frozen code and returns it for inspection.
@@ -311,7 +312,8 @@ func TestErrorMapping(t *testing.T) {
 		{
 			name: "credential chain failure maps to auth_failed",
 			api:  fakeAPI{},
-			ctor: errors.New("no usable OCI credentials in environment/instance/config chain: empty"),
+			// wrapped the same way newRealKMS wraps the sentinel
+			ctor: fmt.Errorf("%w: chain empty", errNoCredentials),
 			want: CodeAuthFailed,
 		},
 		{
@@ -332,8 +334,26 @@ func TestErrorMapping(t *testing.T) {
 	}
 }
 
-func TestDecryptErrorMapping(t *testing.T) {
-	// a blob routed at an endpoint whose key is gone
+// TestDeadlineExpiryMapsToKeyUnavailable proves the per-request deadline is
+// actually threaded into the SDK call: a client that blocks until its
+// context dies must surface key_unavailable, not hang for the SDK's 60s.
+func TestDeadlineExpiryMapsToKeyUnavailable(t *testing.T) {
+	h := handlerWithClient(fakeAPI{encrypt: func(ctx context.Context, keyID, ptB64 string) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}}, nil)
+	h.RequestTimeout = 50 * time.Millisecond
+	start := time.Now()
+	_, _, err := h.Encrypt(map[string]any{"key_id": "k", "crypto_endpoint": "e"}, rampProbe())
+	if we := wireErr(t, err); we.Code != CodeKeyUnavailable {
+		t.Fatalf("code = %s, want key_unavailable", we.Code)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("deadline not applied, took %v", elapsed)
+	}
+}
+
+func TestDecryptErrorMapping(t *testing.T) { // a blob routed at an endpoint whose key is gone
 	blobJSON, _ := json.Marshal(blob{
 		KeyID:          "ocid1.key.oc1.r.v.k",
 		CryptoEndpoint: "https://v-crypto.kms.r.oraclecloud.com",

@@ -1,5 +1,5 @@
 // Package ociconfig builds the OCI credential chain for the plugin.
-// Ported from the sops OCI KMS provider (PR #1226, ocikms/config_provider.go).
+// Ported from getsops/sops PR #1226 (MPL-2.0), ocikms/config_provider.go.
 package ociconfig
 
 import (
@@ -23,6 +23,9 @@ var newIPProvider = auth.InstancePrincipalConfigurationProvider
 // 3) Config file providers (OCI_CLI_CONFIG_FILE/PROFILE if set)
 // 4) Default config provider (~/.oci/config, TF_VAR_*)
 // 5) Instance Principals (when running on OCI compute) - lazily evaluated as last resort
+//
+// Serially safe by construction: every call builds a fresh chain, so callers
+// never share lazy provider state.
 func ConfigurationProvider() (common.ConfigurationProvider, error) {
 	var providers []common.ConfigurationProvider
 
