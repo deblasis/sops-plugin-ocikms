@@ -211,6 +211,61 @@ func TestEncryptRejectsEmptyPlaintext(t *testing.T) {
 	}
 }
 
+// validEndpoint satisfies validateEndpoint so client-scripted tests reach
+// the KMS call instead of tripping endpoint validation.
+const validEndpoint = "https://vaultx-crypto.kms.uk-london-1.oraclecloud.com"
+
+func TestEncryptRejectsDisallowedEndpoints(t *testing.T) {
+	h := handlerWithClient(fakeKMS{}, nil)
+	for _, endpoint := range []string{
+		"https://vaultx-crypto.kms.uk-london-1.oraclecloud.com", // control: passes
+		"http://127.0.0.1:12345",                                // loopback simulator
+		"https://localhost:1",
+		"http://[::1]:1",
+	} {
+		if _, _, err := h.Encrypt(map[string]any{"key_id": "k", "crypto_endpoint": endpoint}, rampProbe()); err != nil {
+			t.Fatalf("endpoint %q must pass: %v", endpoint, err)
+		}
+	}
+	for _, endpoint := range []string{
+		"http://evil.example",                           // not https
+		"https://evil.example",                          // not oraclecloud
+		"https://evil.oraclecloud.com.attacker.example", // suffix trick
+		"https://oraclecloud.com",                       // apex, not a subdomain
+		"e",                                             // not a URL
+		"https://",                                      // no host
+	} {
+		_, _, err := h.Encrypt(map[string]any{"key_id": "k", "crypto_endpoint": endpoint}, rampProbe())
+		we := wireErr(t, err)
+		if we.Code != CodeConfigError {
+			t.Fatalf("endpoint %q: code = %s, want config_error", endpoint, we.Code)
+		}
+		if !strings.Contains(we.Message, endpoint) {
+			t.Fatalf("message %q does not name the rejected endpoint", we.Message)
+		}
+	}
+}
+
+func TestDecryptRejectsDisallowedBlobEndpoints(t *testing.T) {
+	h := handlerWithClient(fakeKMS{}, nil)
+	for _, endpoint := range []string{"https://evil.example", "http://evil.example"} {
+		blobJSON, _ := json.Marshal(blob{
+			KeyID:          "ocid1.key.oc1.r.v.k",
+			CryptoEndpoint: endpoint,
+			Region:         "r",
+			CiphertextB64:  "Y2lwaGVydGV4dA==",
+		})
+		_, err := h.Decrypt(BlobPrefix + base64.StdEncoding.EncodeToString(blobJSON))
+		we := wireErr(t, err)
+		if we.Code != CodeInvalidRequest {
+			t.Fatalf("endpoint %q: code = %s, want invalid_request", endpoint, we.Code)
+		}
+		if !strings.Contains(we.Message, endpoint) {
+			t.Fatalf("message %q does not name the rejected endpoint", we.Message)
+		}
+	}
+}
+
 // Stunt-free cap coverage: a misbehaving backend must not push an ok:true
 // response line over the host's 1MiB cap from either direction, so both
 // oversized answers are rejected as internal on every CI run, no simulator.
@@ -218,7 +273,7 @@ func TestEncryptCapsOversizedCiphertext(t *testing.T) {
 	h := handlerWithClient(fakeAPI{encrypt: func(context.Context, string, string) (string, error) {
 		return strings.Repeat("A", maxCiphertextB64Len+1), nil
 	}}, nil)
-	_, _, err := h.Encrypt(map[string]any{"key_id": "k", "crypto_endpoint": "e"}, rampProbe())
+	_, _, err := h.Encrypt(map[string]any{"key_id": "k", "crypto_endpoint": validEndpoint}, rampProbe())
 	we := wireErr(t, err)
 	if we.Code != CodeInternal {
 		t.Fatalf("code = %s, want internal", we.Code)
@@ -297,7 +352,7 @@ func handlerWithClient(api kmsAPI, ctorErr error) *KMSHandler {
 }
 
 func TestErrorMapping(t *testing.T) {
-	config := map[string]any{"key_id": "k", "crypto_endpoint": "e"}
+	config := map[string]any{"key_id": "k", "crypto_endpoint": validEndpoint}
 	cases := []struct {
 		name string
 		api  kmsAPI
@@ -381,7 +436,7 @@ func TestDeadlineExpiryMapsToKeyUnavailable(t *testing.T) {
 	}}, nil)
 	h.RequestTimeout = 50 * time.Millisecond
 	start := time.Now()
-	_, _, err := h.Encrypt(map[string]any{"key_id": "k", "crypto_endpoint": "e"}, rampProbe())
+	_, _, err := h.Encrypt(map[string]any{"key_id": "k", "crypto_endpoint": validEndpoint}, rampProbe())
 	if we := wireErr(t, err); we.Code != CodeKeyUnavailable {
 		t.Fatalf("code = %s, want key_unavailable", we.Code)
 	}

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -52,6 +53,34 @@ func newRealKMS(ctx context.Context, cryptoEndpoint string) (*realKMS, error) {
 		return nil, fmt.Errorf("failed to create OCI KMS client: %w", err)
 	}
 	return &realKMS{client: client}, nil
+}
+
+// oracleCloudSuffix is the only remote host family signed KMS requests may
+// reach. Dot-suffix match, never Contains: a Contains check would let
+// evil.oraclecloud.com.attacker.example through.
+const oracleCloudSuffix = ".oraclecloud.com"
+
+// validateEndpoint gates which hosts signed KMS requests may reach. The
+// endpoint arrives from repo-controlled sources (creation-rule config on
+// encrypt, file metadata on decrypt), so an ungated endpoint would send
+// OCI-signed requests with the data key in the body to any host a hostile
+// repo names. Allowed: https to *.oraclecloud.com, plus loopback (127.0.0.1,
+// [::1], localhost, any port, http or https) so the ocisim simulator and
+// httptest fakes keep working; loopback cannot exfiltrate to a remote host.
+func validateEndpoint(endpoint string) error {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("crypto endpoint %q is not a valid URL: %v", endpoint, err)
+	}
+	host := strings.ToLower(u.Hostname())
+	if (u.Scheme == "http" || u.Scheme == "https") &&
+		(host == "127.0.0.1" || host == "::1" || host == "localhost") {
+		return nil
+	}
+	if u.Scheme != "https" || !strings.HasSuffix(host, oracleCloudSuffix) {
+		return fmt.Errorf("crypto endpoint %q is not https to an %s host", endpoint, strings.TrimPrefix(oracleCloudSuffix, "."))
+	}
+	return nil
 }
 
 // encryptWrapFormat/decryptWrapFormat pin the error-wrap strings; fuzz tests
@@ -196,6 +225,11 @@ func (h *KMSHandler) Encrypt(config map[string]any, plaintext []byte) (string, s
 	} else if keyID == "" || endpoint == "" {
 		return "", "", &WireError{Code: CodeConfigError, Message: "config requires string fields key_id and crypto_endpoint"}
 	}
+	// fake mode forced the fake endpoint above, which validates anyway; keep
+	// the check unconditional so no path skips it
+	if err := validateEndpoint(endpoint); err != nil {
+		return "", "", &WireError{Code: CodeConfigError, Message: err.Error()}
+	}
 
 	// a fresh client per request is fine for sops' usage (one key operation
 	// per process lifetime); cache per endpoint if you ever batch
@@ -242,6 +276,10 @@ func (h *KMSHandler) Decrypt(wrapped string) ([]byte, error) {
 	}
 	if b.CryptoEndpoint == "" {
 		return nil, &WireError{Code: CodeInvalidRequest, Message: "wrapped blob is missing cryptoEndpoint"}
+	}
+	// blob-sourced endpoint: a foreign blob is bad input, not bad config
+	if err := validateEndpoint(b.CryptoEndpoint); err != nil {
+		return nil, &WireError{Code: CodeInvalidRequest, Message: err.Error()}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), h.timeout())
