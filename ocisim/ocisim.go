@@ -277,11 +277,13 @@ func (s *Server) Deactivate() error {
 
 // Reset wipes the ocikms service state via the dashboard's
 // /api/state/<service>/reset endpoint, the same call `stunt reset ocikms`
-// makes: KV counters (flap parity, the ciphertext sequence) and stored blobs
-// go. v0.52 does not re-run collection seeding on reset; the adapter
-// re-materializes its seed keys lazily, so a reset server behaves like a
-// fresh one. Active profiles are runtime activation state, not adapter
-// state, and survive; pair with Deactivate when a test needs both.
+// makes: collections and KV (flap parity, the seq counter, stored blobs) are
+// cleared server-side. The adapter complements this: it re-materializes its
+// seed keys lazily, and it embeds a per-world generation in ciphertext names
+// that reset re-mints, so pre-reset ciphertexts can never decrypt afterwards
+// (404) even if a KV entry survived the wipe, and the rewound seq cannot
+// collide with old names. Active profiles are runtime activation state, not
+// adapter state, and survive; pair with Deactivate when a test needs both.
 func (s *Server) Reset() error {
 	if s == nil {
 		return errors.New("ocisim: no server (stunt unavailable)")

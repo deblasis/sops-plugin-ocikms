@@ -18,11 +18,16 @@ endpoints:
     method: POST
     handler: scripts/service.star#on_decrypt
 
-# keys known to the simulator; encrypt/decrypt against any other OCID is 404
+# keys known to the simulator; encrypt/decrypt against any other OCID is 404.
+# The world collection holds the ciphertext-name generation; a state reset
+# clears collections, so reset mints a new generation and orphans every
+# pre-reset ciphertext even if KV entries survived the wipe.
 resources:
   - name: keys
     kind: collection
     seed: fixtures/keys.jsonl
+  - name: world
+    kind: collection
 
 # auth is stub-level on purpose: the plugin's tests need real SDK-signed
 # requests to pass, not real auth decisions. 401/403 come from profiles.

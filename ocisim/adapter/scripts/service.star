@@ -25,7 +25,7 @@ def on_encrypt(req):
         return _err(404, "NotFound", "The key " + key_id + " does not exist")
 
     seq = store_kv_incr("kms", "seq")
-    ct = "ocisim-" + str(seq)
+    ct = "ocisim-" + _world() + "-" + str(seq)
     store_kv_set("blobs", ct, plaintext)
     store_kv_set("blobkeys", ct, key_id)
     return respond(200, {"ciphertext": ct})
@@ -48,6 +48,10 @@ def on_decrypt(req):
         return _err(400, "InvalidParameter", "keyId is required")
     if _find_key(key_id) == None:
         return _err(404, "NotFound", "The key " + key_id + " does not exist")
+    # a ciphertext minted under an earlier world (pre-reset) must not resolve
+    # even if its KV entry somehow survived the wipe
+    if _ct_gen(ct) != _world():
+        return _err(404, "NotFound", "unknown ciphertext")
     pt = store_kv_get("blobs", ct)
     if pt == None:
         return _err(404, "NotFound", "unknown ciphertext")
@@ -66,6 +70,26 @@ _SEED_KEYS = [
     "ocid1.key.oc1.sim-region.simvault.simkey1",
     "ocid1.key.oc1.sim-region.simvault.simkey2",
 ]
+
+def _world():
+    # ciphertext names embed a world generation. Reset clears collections, so
+    # the world doc vanishes and a fresh gen is minted: pre-reset ciphertexts
+    # then 404 even if their KV entries somehow survived the reset, and the
+    # rewound seq counter cannot collide with old names.
+    c = store_collection("world")
+    doc = c.get("world")
+    if doc == None:
+        seq = store_kv_incr("kms", "seq")
+        gen = crypto.sha256(str(clock.now_unix()) + ":" + str(seq))[:12]
+        c.insert({"id": "world", "gen": gen})
+        return gen
+    return doc.get("gen", "")
+
+def _ct_gen(ct):
+    parts = ct.split("-")
+    if len(parts) != 3:
+        return None
+    return parts[1]
 
 def _find_key(key_id):
     c = store_collection("keys")

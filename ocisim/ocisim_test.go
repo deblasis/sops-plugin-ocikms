@@ -265,6 +265,33 @@ func TestUnknownKeyIsKeyUnavailable(t *testing.T) {
 	wantCode(t, res, "key_unavailable")
 }
 
+// TestResetInvalidatesOldCiphertexts: reset mints a new ciphertext-name
+// generation, so a pre-reset blob must not decrypt afterwards while a fresh
+// round trip still works.
+func TestResetInvalidatesOldCiphertexts(t *testing.T) {
+	requireSim(t)
+	s := startPlugin(t)
+	res := s.do(encryptReq(1, Key1, sim.Endpoint(), []byte("before-reset")))
+	if !res.OK {
+		t.Fatalf("encrypt: %+v", res.Error)
+	}
+	if err := sim.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	wantCode(t, s.do(decryptReq(2, res.Wrapped)), "key_unavailable")
+	fresh := s.do(encryptReq(3, Key1, sim.Endpoint(), []byte("after-reset")))
+	if !fresh.OK {
+		t.Fatalf("fresh encrypt after reset: %+v", fresh.Error)
+	}
+	if fresh.Wrapped == res.Wrapped {
+		t.Fatalf("seq rewound into the old ciphertext name: %q", fresh.Wrapped)
+	}
+	back := s.do(decryptReq(4, fresh.Wrapped))
+	if !back.OK || string(back.Plaintext) != "after-reset" {
+		t.Fatalf("fresh round trip after reset: ok=%v %+v", back.OK, back.Error)
+	}
+}
+
 // TestDecryptBindsCiphertextToKey: the simulator binds each ciphertext to its
 // key, so a blob whose keyId was swapped after encrypt must not decrypt.
 func TestDecryptBindsCiphertextToKey(t *testing.T) {
@@ -348,7 +375,7 @@ func TestFlapAlternates(t *testing.T) {
 	if err := sim.Activate("flap"); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { sim.Deactivate() })
+	cleanupDeactivate(t)
 	s := startPlugin(t)
 	wantCode(t, s.do(encryptReq(1, Key1, sim.Endpoint(), []byte("k"))), "key_unavailable")
 	res := s.do(encryptReq(2, Key1, sim.Endpoint(), []byte("k")))
@@ -362,7 +389,7 @@ func TestOversizedCiphertext(t *testing.T) {
 	if err := sim.Activate("oversized"); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { sim.Deactivate() })
+	cleanupDeactivate(t)
 	s := startPlugin(t)
 	res := s.do(encryptReq(1, Key1, sim.Endpoint(), []byte("k")))
 	if !res.OK {
@@ -380,7 +407,7 @@ func TestSlowFailureIsKeyUnavailable(t *testing.T) {
 	if err := sim.Activate("slow-500-3s"); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { sim.Deactivate() })
+	cleanupDeactivate(t)
 	s := startPlugin(t)
 	start := time.Now()
 	res := s.do(encryptReq(1, Key1, sim.Endpoint(), []byte("k")))
@@ -401,7 +428,7 @@ func TestHangHitsPluginDeadline(t *testing.T) {
 	if err := sim.Activate("hang"); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { sim.Deactivate() })
+	cleanupDeactivate(t)
 	s := startPlugin(t)
 	start := time.Now()
 	res := s.do(encryptReq(1, Key1, sim.Endpoint(), []byte("k")))
