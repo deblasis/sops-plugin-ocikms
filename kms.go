@@ -204,19 +204,9 @@ func (h *KMSHandler) Encrypt(config map[string]any, plaintext []byte) (string, s
 }
 
 func (h *KMSHandler) Decrypt(wrapped string) ([]byte, error) {
-	if !strings.HasPrefix(wrapped, BlobPrefix) {
-		return nil, &WireError{Code: CodeInvalidRequest, Message: "wrapped blob does not start with " + BlobPrefix}
-	}
-	payload, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(wrapped, BlobPrefix))
-	if err != nil {
-		return nil, &WireError{Code: CodeInvalidRequest, Message: "wrapped blob payload is not valid base64"}
-	}
-	var b blob
-	if err := json.Unmarshal(payload, &b); err != nil {
-		return nil, &WireError{Code: CodeInvalidRequest, Message: "wrapped blob payload is not valid JSON"}
-	}
-	if b.KeyID == "" || b.CiphertextB64 == "" {
-		return nil, &WireError{Code: CodeInvalidRequest, Message: "wrapped blob is missing keyId or ciphertext"}
+	b, werr := parseWrappedBlob(wrapped)
+	if werr != nil {
+		return nil, werr
 	}
 
 	if h.Fake {
@@ -246,6 +236,27 @@ func (h *KMSHandler) Decrypt(wrapped string) ([]byte, error) {
 		return nil, &WireError{Code: CodeInternal, Message: "KMS plaintext is not valid base64"}
 	}
 	return plaintext, nil
+}
+
+// parseWrappedBlob decodes the ocikms.v1 wrapped-key payload. Every parse
+// failure is invalid_request: a foreign or corrupt blob is distinguishable
+// from a backend failure, which is the point of the prefix.
+func parseWrappedBlob(wrapped string) (blob, *WireError) {
+	if !strings.HasPrefix(wrapped, BlobPrefix) {
+		return blob{}, &WireError{Code: CodeInvalidRequest, Message: "wrapped blob does not start with " + BlobPrefix}
+	}
+	payload, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(wrapped, BlobPrefix))
+	if err != nil {
+		return blob{}, &WireError{Code: CodeInvalidRequest, Message: "wrapped blob payload is not valid base64"}
+	}
+	var b blob
+	if err := json.Unmarshal(payload, &b); err != nil {
+		return blob{}, &WireError{Code: CodeInvalidRequest, Message: "wrapped blob payload is not valid JSON"}
+	}
+	if b.KeyID == "" || b.CiphertextB64 == "" {
+		return blob{}, &WireError{Code: CodeInvalidRequest, Message: "wrapped blob is missing keyId or ciphertext"}
+	}
+	return b, nil
 }
 
 // classify maps an OCI SDK failure onto the frozen v1 codes:

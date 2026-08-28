@@ -72,6 +72,12 @@ OCI_private_key_path), the config file named by OCI_CLI_CONFIG_FILE
 (optional OCI_CLI_PROFILE), the default ~/.oci/config, and finally instance
 principals (lazily, only on OCI compute).
 
+Test-isolation caveat: the SDK's config-file provider resolves the home
+directory through the OS user database (os/user), not HOME/USERPROFILE, so
+pointing those at an empty dir does NOT hide a real ~/.oci/config on the
+machine. Tests that need a credential-free environment skip when a real
+config is present.
+
 ## Error mapping
 
 OCI failure to frozen protocol code: 401/403 -> auth_failed, 404/429/5xx and
@@ -85,6 +91,27 @@ key_id/crypto_endpoint in config -> config_error, anything else -> internal.
 
 Requires Go 1.25 or newer.
 
+### Fuzzing
+
+Three native fuzz targets live in fuzz_test.go; their seed corpora run as
+plain tests on every `go test`. Deepen each with:
+
+    go test -run '^$' -fuzz FuzzParseWrappedBlob -fuzztime 60s .
+    go test -run '^$' -fuzz FuzzKMSResponseDecode -fuzztime 60s .
+    go test -run '^$' -fuzz FuzzProtocolLoop -fuzztime 60s .
+
+- FuzzParseWrappedBlob: arbitrary strings into the wrapped-blob parser; every
+  rejection must be invalid_request, never a panic.
+- FuzzKMSResponseDecode: arbitrary status/body pairs through the verbatim OCI
+  SDK client against a loopback server, then classify; the result must stay
+  inside the frozen code taxonomy.
+- FuzzProtocolLoop: arbitrary bytes as the whole stdin stream of an in-process
+  Serve; it must terminate, emit only valid JSON lines, and never answer
+  ok:true with empty payload fields.
+
+CI note: regular CI runs the seed corpora only (cheap); schedule the
+-fuzztime runs as a separate periodic job, not per commit.
+
 ## OCI KMS simulator (ocisim)
 
 `ocisim/` is an adversarial test stand-in for OCI KMS, built as a
@@ -97,6 +124,17 @@ encrypt/decrypt round trips, multiple keys, unknown-key 404s, and failure
 injection (auth-401, auth-403, key-gone-404, throttled-429 with Retry-After,
 outage-500, unavailable-503, flap, garbage 200s, oversized payloads,
 slow-500-3s, hang). The 30s hang boundary test runs only with OCISIM_SLOW=1.
+
+The adversarial battery (ocisim/battery_test.go) layers ten scenarios on the
+same harness: auth rejection and recovery, sustained throttling with a
+server-side request counter proving no retry storm, ten flap cycles,
+count-bounded faults (throttle-N, burst-garbage-N: the first N calls fail,
+then healthy; counters live in KV, Reset re-arms them), malformed successes
+(a >1MiB ciphertext is emitted fine but rejected by the plugin's inbound
+1MiB line cap when fed back as a decrypt request), slow failures on both
+paths, credential-free startup, cross-simulator endpoint mismatch and
+wrong-key blobs, mid-sequence flaps, and rapid profile switching with
+process-leak checks. Default suite stays under ~30s.
 
 Auth is stub-level: request signatures are accepted but never validated, so
 401/403 come from profiles, not signature checks. Known key OCIDs are

@@ -11,6 +11,16 @@ def on_encrypt(req):
         return respond(200, {"ciphertext": "A" * 1100000})
     if mode == "flap" and _flap_fails():
         return _err(500, "InternalServerError", "simulated flap")
+    bounded = _bounded(mode)
+    if bounded != None:
+        kind, n = bounded
+        cnt = store_kv_incr("kms", "bounded-" + kind + "-" + str(n))
+        if cnt <= n:
+            if kind == "throttle":
+                # the count rides in the message so tests can prove the client
+                # made exactly one request per operation (no retry storm)
+                return _err(429, "TooManyRequests", "simulated throttling (request " + str(cnt) + ")")
+            return respond(200, "not-json {oops")
 
     body = req.get("body")
     if body == None:
@@ -36,6 +46,14 @@ def on_decrypt(req):
         return respond(200, "not-json {oops")
     if mode == "flap" and _flap_fails():
         return _err(500, "InternalServerError", "simulated flap")
+    bounded = _bounded(mode)
+    if bounded != None:
+        kind, n = bounded
+        cnt = store_kv_incr("kms", "bounded-" + kind + "-" + str(n))
+        if cnt <= n:
+            if kind == "throttle":
+                return _err(429, "TooManyRequests", "simulated throttling (request " + str(cnt) + ")")
+            return respond(200, "not-json {oops")
 
     body = req.get("body")
     if body == None:
@@ -65,6 +83,24 @@ def on_decrypt(req):
 def _flap_fails():
     # persisted in KV so the alternation holds across plugin processes
     return store_kv_incr("kms", "flap") % 2 == 1
+
+# count-bounded modes: throttle-<n> answers 429 (with the request count in the
+# message) and burst-garbage-<n> answers a non-JSON 200 for the first n
+# handler calls, then behaves healthy. The counter persists in KV, so a test
+# that re-arms the same bound must Reset first (the same contract as flap).
+def _bounded(mode):
+    # profile_active() is None when no profile is live
+    if type(mode) != "string":
+        return None
+    if mode.startswith("throttle-"):
+        n = int(mode[len("throttle-"):])
+        if n > 0:
+            return ("throttle", n)
+    if mode.startswith("burst-garbage-"):
+        n = int(mode[len("burst-garbage-"):])
+        if n > 0:
+            return ("garbage", n)
+    return None
 
 _SEED_KEYS = [
     "ocid1.key.oc1.sim-region.simvault.simkey1",

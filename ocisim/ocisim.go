@@ -257,8 +257,10 @@ func (s *Server) Endpoint() string { return s.endpoint }
 
 // Activate switches the simulator into a failure mode. Profile names are the
 // manifest bundles (auth-401, auth-403, key-gone-404, throttled-429,
-// outage-500, unavailable-503, slow-500-3s, hang) and the adapter modes
-// (flap, garbage, oversized). Runtime-only: Close discards the world.
+// outage-500, unavailable-503, slow-500-3s, hang), the adapter modes (flap,
+// garbage, oversized), and the adapter count-bounded modes (throttle-N,
+// burst-garbage-N: the first N calls fail, then healthy; Reset re-arms).
+// Runtime-only: Close discards the world.
 func (s *Server) Activate(profile string) error {
 	// nil-safe for callers that hold a Start() failure: tests skip instead
 	if s == nil {

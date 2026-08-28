@@ -39,10 +39,17 @@ identity:
 #   flap      alternate calls fail 500 then succeed, counter persists
 #   garbage   200 whose body is not JSON
 #   oversized 200 whose ciphertext field blows past the 1 MiB protocol cap
+#   throttle-<n> / burst-garbage-<n>: fail the first n calls (429 / non-JSON
+#             200), then healthy; counters persist in KV, Reset re-arms them
 profiles:
   flap: "alternate calls fail 500 then succeed"
   garbage: "200 responses whose body is not valid JSON"
   oversized: "200 responses with a >1MiB ciphertext field"
+  throttle-1: "429 once, then healthy"
+  throttle-3: "429 three times, then healthy"
+  throttle-99: "429 for 99 calls (sustained throttling), then healthy"
+  burst-garbage-1: "non-JSON 200 once, then healthy"
+  burst-garbage-2: "non-JSON 200 twice, then healthy"
 
 rules:
   - name: catchall-404
