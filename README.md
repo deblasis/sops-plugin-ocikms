@@ -9,7 +9,7 @@ provider (PR #1226).
 The plugin wraps and unwraps sops' 32-byte data key with an OCI KMS key. The
 wrapped value stored in file metadata is:
 
-    ocikms.v1.<std-base64 of JSON {"keyId","cryptoEndpoint","region","ciphertext"}>
+    ocikms.v1.<std-base64 of JSON {"keyId","cryptoEndpoint","region","ciphertext"[,"fake":true]}>
 
 so decryption needs only the blob plus whatever credentials the runtime
 environment provides (OCI_CLI_* or OCI_* env vars, ~/.oci/config, or instance
@@ -45,7 +45,12 @@ creation_rules:
 ```
 
 `config` must never contain credentials; it carries only the key OCID and the
-vault crypto endpoint.
+vault crypto endpoint. The endpoint must be an `https` URL on a
+`*.oraclecloud.com` host; loopback URLs (`127.0.0.1`, `[::1]`, `localhost`,
+any port, http or https) are also accepted so local simulators work. Anything
+else is rejected as `config_error` before any signed request leaves the
+process, and a blob naming a disallowed endpoint is rejected as
+`invalid_request` on decrypt.
 
 ## Verify
 
@@ -59,9 +64,18 @@ Without OCI credentials the real encrypt/decrypt cannot run, so set
 the network. Fake mode is loud and distinguishable: it always wraps under a
 fixed fake key id and endpoint (`ocid1.key.oc1.fake-region.fakevault.fakekey`),
 ignoring whatever the config carries, so a fake blob is identifiable by its
-key_ref and never masquerades as a real OCID; and it prints a one-line warning
-to stderr on every fake wrap and unwrap. This env var exists only as a testing
-hook; without it the plugin always talks to real OCI KMS.
+key_ref and never masquerades as a real OCID; the blob payload also carries
+`"fake": true`, so tooling can machine-detect fake-wrapped files from metadata
+alone without pattern-matching OCIDs; and it prints a one-line warning to
+stderr on every fake wrap and unwrap, which newer sops hosts also surface
+after each operation. This env var exists only as a testing hook; without it
+the plugin always talks to real OCI KMS.
+
+With credentials and a real key, verify also runs in real mode: newer sops
+builds support a `--config` flag on `sops plugins verify`, and this plugin
+requires config for real encryption:
+
+    sops plugins verify --config '{"key_id":"ocid1.key.oc1.eu-frankfurt-1.yourvault.yourkey","crypto_endpoint":"https://yourvault-crypto.kms.eu-frankfurt-1.oraclecloud.com"}' "$(command -v sops-plugin-ocikms)"
 
 ## Credentials at runtime
 
@@ -82,7 +96,9 @@ config is present.
 
 OCI failure to frozen protocol code: 401/403 -> auth_failed, 404/429/5xx and
 network timeouts -> key_unavailable, 400 -> invalid_request, missing
-key_id/crypto_endpoint in config -> config_error, anything else -> internal.
+key_id/crypto_endpoint or a disallowed crypto_endpoint in config ->
+config_error, a disallowed crypto_endpoint in the blob -> invalid_request,
+anything else -> internal.
 
 ## Development
 

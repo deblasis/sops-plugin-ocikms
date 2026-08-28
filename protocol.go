@@ -1,3 +1,7 @@
+// Package ocikms implements a sops-plugin/1 key provider for Oracle Cloud
+// Infrastructure Key Management: it wraps and unwraps the sops data key
+// with a KMS key over the plugin wire protocol, whose contract is the spec
+// at docs/plugins/spec.md in the getsops/sops repo.
 package ocikms
 
 import (
