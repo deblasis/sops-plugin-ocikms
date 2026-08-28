@@ -129,12 +129,14 @@ The adversarial battery (ocisim/battery_test.go) layers ten scenarios on the
 same harness: auth rejection and recovery, sustained throttling with a
 server-side request counter proving no retry storm, ten flap cycles,
 count-bounded faults (throttle-N, burst-garbage-N: the first N calls fail,
-then healthy; counters live in KV, Reset re-arms them), malformed successes
-(a >1MiB ciphertext is emitted fine but rejected by the plugin's inbound
-1MiB line cap when fed back as a decrypt request), slow failures on both
-paths, credential-free startup, cross-simulator endpoint mismatch and
-wrong-key blobs, mid-sequence flaps, and rapid profile switching with
-process-leak checks. Default suite stays under ~30s.
+then healthy; counters live in KV, Reset re-arms them), malformed success
+bodies, slow failures on both paths, credential-free startup,
+cross-simulator endpoint mismatch and wrong-key blobs, mid-sequence flaps,
+and rapid profile switching with process-leak checks. Oversized ciphertexts
+are stopped by the plugin's own outbound cap (128 KiB, answered internal,
+symmetric with the empty-ciphertext guard), and a >1MiB blob arriving from
+outside is rejected by the inbound 1MiB line cap with a non-zero exit.
+Default suite stays under ~30s.
 
 Auth is stub-level: request signatures are accepted but never validated, so
 401/403 come from profiles, not signature checks. Known key OCIDs are

@@ -252,13 +252,13 @@ func TestBatteryBurstGarbageCountSemantics(t *testing.T) {
 }
 
 // Scenario 5: malformed success bodies. A garbage 200 is internal (existing
-// coverage); an oversized ciphertext encrypts "successfully" and only dies
-// downstream. The plugin has no outbound cap, so the >1MiB wrapped blob IS
-// emitted; the layer that catches it is the plugin's own inbound 1MiB line
-// cap when that blob is later fed back as a decrypt request (the same cap the
-// sops host applies to response lines). Asserted here: no response line,
-// process exits non-zero, no hang.
-func TestBatteryOversizedRejectedAtDecryptTime(t *testing.T) {
+// coverage). An oversized ciphertext trips the plugin's outbound cap (128 KiB,
+// symmetric with the empty-ciphertext guard): the answer is internal, so a
+// megabyte blob never reaches the wire. The inbound 1MiB line cap remains the
+// last line of defense for oversized blobs arriving from outside: a
+// hand-forged >1MiB wrapped value fed to decrypt gets no response line and a
+// non-zero exit, never a hang.
+func TestBatteryOversizedCiphertextCapped(t *testing.T) {
 	requireSim(t)
 	if err := sim.Activate("oversized"); err != nil {
 		t.Fatal(err)
@@ -266,10 +266,19 @@ func TestBatteryOversizedRejectedAtDecryptTime(t *testing.T) {
 	cleanupDeactivate(t)
 	s := startPlugin(t)
 	res := op(s, 1, encryptReq(1, Key1, sim.Endpoint(), []byte("k")))
-	if !res.OK || len(res.Wrapped) <= 1<<20 {
-		t.Fatalf("oversized encrypt must answer ok with a >1MiB blob, got ok=%v len=%d", res.OK, len(res.Wrapped))
+	if res.OK || res.Error == nil || res.Error.Code != "internal" {
+		t.Fatalf("want internal from the outbound cap, got ok=%v %+v", res.OK, res.Error)
 	}
-	payload, err := json.Marshal(decryptReq(2, res.Wrapped))
+
+	// inbound half: forge the >1MiB blob the plugin would have refused to emit
+	blobJSON, _ := json.Marshal(struct {
+		KeyID          string `json:"keyId"`
+		CryptoEndpoint string `json:"cryptoEndpoint"`
+		Region         string `json:"region"`
+		CiphertextB64  string `json:"ciphertext"`
+	}{Key1, sim.Endpoint(), "sim-region", strings.Repeat("A", 1200000)})
+	forged := "ocikms.v1." + base64.StdEncoding.EncodeToString(blobJSON)
+	payload, err := json.Marshal(decryptReq(2, forged))
 	if err != nil {
 		t.Fatal(err)
 	}

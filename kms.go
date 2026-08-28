@@ -128,6 +128,11 @@ type KMSHandler struct {
 // answering key_unavailable at 30s is friendlier than dying silently.
 const defaultRequestTimeout = 30 * time.Second
 
+// maxCiphertextB64Len bounds the ciphertext the plugin will wrap: a backend
+// that answers with megabytes is broken, and echoing it would only move the
+// failure downstream past the protocol's 1 MiB line cap.
+const maxCiphertextB64Len = 128 << 10
+
 func (h *KMSHandler) timeout() time.Duration {
 	if h.RequestTimeout > 0 {
 		return h.RequestTimeout
@@ -201,6 +206,12 @@ func (h *KMSHandler) Encrypt(config map[string]any, plaintext []byte) (string, s
 	}
 	if ctB64 == "" {
 		return "", "", &WireError{Code: CodeInternal, Message: "KMS returned an empty ciphertext"}
+	}
+	// outbound cap, symmetric with the empty guard: a legit 32-byte-key wrap
+	// is a few hundred chars, so 128 KiB is ~250x headroom while keeping the
+	// response line well under the host's 1 MiB protocol cap
+	if len(ctB64) > maxCiphertextB64Len {
+		return "", "", &WireError{Code: CodeInternal, Message: "KMS returned an oversized ciphertext"}
 	}
 	b := blob{KeyID: keyID, CryptoEndpoint: endpoint, Region: regionFromOCID(keyID), CiphertextB64: ctB64}
 	payload, err := json.Marshal(b)

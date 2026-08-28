@@ -430,13 +430,13 @@ func TestOversizedCiphertext(t *testing.T) {
 	cleanupDeactivate(t)
 	s := startPlugin(t)
 	res := s.do(encryptReq(1, Key1, sim.Endpoint(), []byte("k")))
-	if !res.OK {
-		t.Fatalf("oversized encrypt must still answer ok: %+v", res.Error)
+	// the plugin's outbound cap answers internal instead of echoing a
+	// megabyte-scale ciphertext that would blow the response-line budget
+	if res.OK {
+		t.Fatal("oversized encrypt must be rejected by the outbound cap")
 	}
-	// 1.1MB ciphertext, base64 again inside the blob: well past the host's
-	// 1 MiB protocol cap, so downstream consumers choke, not the plugin
-	if len(res.Wrapped) <= 1<<20 {
-		t.Fatalf("wrapped blob too small to be oversized: %d", len(res.Wrapped))
+	if res.Error == nil || res.Error.Code != "internal" {
+		t.Fatalf("want internal, got %+v", res.Error)
 	}
 }
 
