@@ -152,6 +152,38 @@ func TestFakeModeForcesFakeKeyEvenWithRealConfig(t *testing.T) {
 	}
 }
 
+// TestFakeBlobCarriesFakeMarker: the additive "fake" field makes fake wraps
+// machine-detectable from metadata alone; real wraps carry no fake key at all.
+func TestFakeBlobCarriesFakeMarker(t *testing.T) {
+	h := &KMSHandler{Fake: true, WarnWriter: io.Discard}
+	wrapped, _, err := h.Encrypt(nil, rampProbe())
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := base64.StdEncoding.DecodeString(strings.TrimPrefix(wrapped, BlobPrefix))
+	var m map[string]any
+	if err := json.Unmarshal(payload, &m); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := m["fake"]; !ok || v != true {
+		t.Fatalf("fake blob must carry \"fake\":true, got %v (present=%v)", v, ok)
+	}
+
+	real := handlerWithClient(fakeKMS{}, nil)
+	wrapped, _, err = real.Encrypt(map[string]any{"key_id": "k", "crypto_endpoint": validEndpoint}, rampProbe())
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _ = base64.StdEncoding.DecodeString(strings.TrimPrefix(wrapped, BlobPrefix))
+	m = map[string]any{} // fresh map: unmarshal into a used map keeps stale keys
+	if err := json.Unmarshal(payload, &m); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m["fake"]; ok {
+		t.Fatal("real blob must not carry a fake field")
+	}
+}
+
 func TestFakeModeWarnsOnStderr(t *testing.T) {
 	var buf bytes.Buffer
 	h := &KMSHandler{Fake: true, WarnWriter: &buf}

@@ -131,6 +131,9 @@ type blob struct {
 	CryptoEndpoint string `json:"cryptoEndpoint"`
 	Region         string `json:"region"`
 	CiphertextB64  string `json:"ciphertext"`
+	// Fake marks a fake-mode wrap so tooling can machine-detect fake files
+	// from metadata alone, without knowing the fake key id.
+	Fake bool `json:"fake,omitempty"`
 }
 
 // KMSHandler implements protocol.Handler against OCI KMS.
@@ -252,7 +255,7 @@ func (h *KMSHandler) Encrypt(config map[string]any, plaintext []byte) (string, s
 	if len(ctB64) > maxCiphertextB64Len {
 		return "", "", &WireError{Code: CodeInternal, Message: "KMS returned an oversized ciphertext"}
 	}
-	b := blob{KeyID: keyID, CryptoEndpoint: endpoint, Region: regionFromOCID(keyID), CiphertextB64: ctB64}
+	b := blob{KeyID: keyID, CryptoEndpoint: endpoint, Region: regionFromOCID(keyID), CiphertextB64: ctB64, Fake: h.Fake}
 	payload, err := json.Marshal(b)
 	if err != nil {
 		return "", "", &WireError{Code: CodeInternal, Message: "marshaling wrapped blob: " + err.Error()}
