@@ -111,8 +111,15 @@ type pluginSession struct {
 func startPlugin(t *testing.T) *pluginSession {
 	t.Helper()
 	requireSim(t)
+	return startPluginWithEnv(t, credEnv)
+}
+
+// startPluginWithEnv boots the plugin with a caller-supplied environment; the
+// battery uses it for credential-isolation scenarios.
+func startPluginWithEnv(t *testing.T, env []string) *pluginSession {
+	t.Helper()
 	cmd := exec.Command(pluginBin)
-	cmd.Env = credEnv
+	cmd.Env = env
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)

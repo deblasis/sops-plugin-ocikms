@@ -54,6 +54,13 @@ func newRealKMS(ctx context.Context, cryptoEndpoint string) (*realKMS, error) {
 	return &realKMS{client: client}, nil
 }
 
+// encryptWrapFormat/decryptWrapFormat pin the error-wrap strings; fuzz tests
+// reuse them so their classify input matches the real wrap exactly.
+const (
+	encryptWrapFormat = "failed to encrypt sops data key with OCI KMS key: %w"
+	decryptWrapFormat = "failed to decrypt sops data key with OCI KMS key: %w"
+)
+
 func (k *realKMS) Encrypt(ctx context.Context, keyID, plaintextB64 string) (string, error) {
 	res, err := k.client.Encrypt(ctx, keymanagement.EncryptRequest{
 		EncryptDataDetails: keymanagement.EncryptDataDetails{
@@ -63,7 +70,7 @@ func (k *realKMS) Encrypt(ctx context.Context, keyID, plaintextB64 string) (stri
 		RequestMetadata: common.RequestMetadata{},
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to encrypt sops data key with OCI KMS key: %w", err)
+		return "", fmt.Errorf(encryptWrapFormat, err)
 	}
 	return *res.EncryptedData.Ciphertext, nil
 }
@@ -76,7 +83,7 @@ func (k *realKMS) Decrypt(ctx context.Context, keyID, ciphertextB64 string) (str
 		},
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to decrypt sops data key with OCI KMS key: %w", err)
+		return "", fmt.Errorf(decryptWrapFormat, err)
 	}
 	return *res.DecryptedData.Plaintext, nil
 }

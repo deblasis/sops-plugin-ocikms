@@ -11,16 +11,9 @@ def on_encrypt(req):
         return respond(200, {"ciphertext": "A" * 1100000})
     if mode == "flap" and _flap_fails():
         return _err(500, "InternalServerError", "simulated flap")
-    bounded = _bounded(mode)
-    if bounded != None:
-        kind, n = bounded
-        cnt = store_kv_incr("kms", "bounded-" + kind + "-" + str(n))
-        if cnt <= n:
-            if kind == "throttle":
-                # the count rides in the message so tests can prove the client
-                # made exactly one request per operation (no retry storm)
-                return _err(429, "TooManyRequests", "simulated throttling (request " + str(cnt) + ")")
-            return respond(200, "not-json {oops")
+    fault = _bounded_fault(mode)
+    if fault != None:
+        return fault
 
     body = req.get("body")
     if body == None:
@@ -46,14 +39,9 @@ def on_decrypt(req):
         return respond(200, "not-json {oops")
     if mode == "flap" and _flap_fails():
         return _err(500, "InternalServerError", "simulated flap")
-    bounded = _bounded(mode)
-    if bounded != None:
-        kind, n = bounded
-        cnt = store_kv_incr("kms", "bounded-" + kind + "-" + str(n))
-        if cnt <= n:
-            if kind == "throttle":
-                return _err(429, "TooManyRequests", "simulated throttling (request " + str(cnt) + ")")
-            return respond(200, "not-json {oops")
+    fault = _bounded_fault(mode)
+    if fault != None:
+        return fault
 
     body = req.get("body")
     if body == None:
@@ -92,15 +80,32 @@ def _bounded(mode):
     # profile_active() is None when no profile is live
     if type(mode) != "string":
         return None
-    if mode.startswith("throttle-"):
-        n = int(mode[len("throttle-"):])
-        if n > 0:
-            return ("throttle", n)
-    if mode.startswith("burst-garbage-"):
-        n = int(mode[len("burst-garbage-"):])
-        if n > 0:
-            return ("garbage", n)
+    for prefix in ["throttle-", "burst-garbage-"]:
+        if mode.startswith(prefix):
+            suffix = mode[len(prefix):]
+            # isdigit rejects "-", "0", "", unicode digits included by int():
+            # a typo'd profile name must fail here, close to the cause
+            if suffix.isdigit() and int(suffix) > 0:
+                if prefix == "throttle-":
+                    return ("throttle", int(suffix))
+                return ("garbage", int(suffix))
     return None
+
+# shared bounded-fault check for both handlers: None when the call should
+# proceed to healthy handling, otherwise the response to return
+def _bounded_fault(mode):
+    bounded = _bounded(mode)
+    if bounded == None:
+        return None
+    kind, n = bounded
+    cnt = store_kv_incr("kms", "bounded-" + kind + "-" + str(n))
+    if cnt > n:
+        return None
+    if kind == "throttle":
+        # the count rides in the message so tests can prove the client made
+        # exactly one request per operation (no retry storm)
+        return _err(429, "TooManyRequests", "simulated throttling (request " + str(cnt) + ")")
+    return respond(200, "not-json {oops")
 
 _SEED_KEYS = [
     "ocid1.key.oc1.sim-region.simvault.simkey1",

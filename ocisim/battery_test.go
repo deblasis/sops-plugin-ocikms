@@ -9,7 +9,6 @@ package ocisim
 // in ocisim_test.go behind OCISIM_SLOW=1; it is not duplicated here.
 
 import (
-	"bufio"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -170,13 +169,19 @@ func TestBatteryFlapCycles(t *testing.T) {
 	next := func() int64 { id++; return id }
 	for i := 0; i < 5; i++ {
 		probe := []byte(fmt.Sprintf("c%d", i))
-		wantCode(t, op(s, next(), encryptReq(id, Key1, sim.Endpoint(), probe)), "key_unavailable")
-		ok := op(s, next(), encryptReq(id, Key1, sim.Endpoint(), probe))
+		// id pinned per call: no reliance on Go's left-to-right argument
+		// evaluation to keep request id and expectation in sync
+		id = next()
+		wantCode(t, op(s, id, encryptReq(id, Key1, sim.Endpoint(), probe)), "key_unavailable")
+		id = next()
+		ok := op(s, id, encryptReq(id, Key1, sim.Endpoint(), probe))
 		if !ok.OK {
 			t.Fatalf("cycle %d: even call must succeed: %+v", i, ok.Error)
 		}
-		wantCode(t, op(s, next(), decryptReq(id, ok.Wrapped)), "key_unavailable")
-		back := op(s, next(), decryptReq(id, ok.Wrapped))
+		id = next()
+		wantCode(t, op(s, id, decryptReq(id, ok.Wrapped)), "key_unavailable")
+		id = next()
+		back := op(s, id, decryptReq(id, ok.Wrapped))
 		if !back.OK || string(back.Plaintext) != fmt.Sprintf("c%d", i) {
 			t.Fatalf("cycle %d: round trip: ok=%v %+v", i, back.OK, back.Error)
 		}
@@ -186,7 +191,8 @@ func TestBatteryFlapCycles(t *testing.T) {
 	}
 }
 
-// Part A / scenario 4: throttle-N fails exactly N times then recovers.
+// Count-bounded adapter contract (Part A): throttle-N fails exactly N times
+// then recovers, and Reset re-arms the counter.
 func TestBatteryThrottleNCountSemantics(t *testing.T) {
 	requireSim(t)
 	if err := sim.Reset(); err != nil {
@@ -221,8 +227,9 @@ func TestBatteryThrottleNCountSemantics(t *testing.T) {
 	}
 }
 
-// Part A / scenario 4: burst-garbage-N answers a non-JSON 200 exactly N times
-// (classify: internal, a 200 the SDK cannot parse), then recovers.
+// Count-bounded adapter contract (Part A): burst-garbage-N answers a non-JSON
+// 200 exactly N times (classify: internal, a 200 the SDK cannot parse), then
+// recovers.
 func TestBatteryBurstGarbageCountSemantics(t *testing.T) {
 	requireSim(t)
 	if err := sim.Reset(); err != nil {
@@ -283,7 +290,7 @@ func TestBatteryOversizedRejectedAtDecryptTime(t *testing.T) {
 
 // Scenario 6 (fast half): a slow failure is still key_unavailable, on both
 // encrypt and decrypt, and the latency proves the call was not short-circuited.
-func TestBatterySlowFailureDecryptPath(t *testing.T) {
+func TestBatterySlowFailuresBothPaths(t *testing.T) {
 	requireSim(t)
 	if err := sim.Activate("slow-500-3s"); err != nil {
 		t.Fatal(err)
@@ -343,46 +350,9 @@ func TestBatteryNoCredentialsMapsAuthFailed(t *testing.T) {
 	}
 	env = append(env, "HOME="+emptyHome, "USERPROFILE="+emptyHome)
 
-	cmd := exec.Command(pluginBin)
-	cmd.Env = env
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		stdin.Close()
-		cmd.Wait()
-	})
-	out := bufio.NewReaderSize(stdout, 1<<20)
-	fmt.Fprintln(stdin, `{"protocol":"sops-plugin","max_version":1}`)
-	line, err := out.ReadString('\n')
-	if err != nil {
-		t.Fatal(err)
-	}
-	var hs struct {
-		Plugin string `json:"plugin"`
-	}
-	if err := json.Unmarshal([]byte(line), &hs); err != nil || hs.Plugin != "ocikms" {
-		t.Fatalf("handshake: %q %v", line, err)
-	}
+	s := startPluginWithEnv(t, env)
 	start := time.Now()
-	fmt.Fprintln(stdin, `{"id":1,"action":"encrypt","config":{"key_id":"`+Key1+`","crypto_endpoint":"`+sim.Endpoint()+`"},"plaintext":"aw=="}`)
-	line, err = out.ReadString('\n')
-	if err != nil {
-		t.Fatalf("no answer under missing creds: %v", err)
-	}
-	var res wireResponse
-	if err := json.Unmarshal([]byte(line), &res); err != nil {
-		t.Fatalf("response %q: %v", line, err)
-	}
+	res := op(s, 1, encryptReq(1, Key1, sim.Endpoint(), []byte("k")))
 	if elapsed := time.Since(start); elapsed > 60*time.Second {
 		t.Fatalf("missing creds took %v: the credential chain stalled", elapsed)
 	}

@@ -118,7 +118,9 @@ func FuzzKMSResponseDecode(f *testing.F) {
 		"aa:bb:cc:dd", pemKey, nil)
 
 	f.Fuzz(func(t *testing.T, rawStatus int64, body []byte) {
-		status := 200 + int(rawStatus%400) // 200..599
+		// ((x%400)+400)%400 keeps negatives in range, so the harness really
+		// covers 200..599 as documented
+		status := 200 + int(((rawStatus%400)+400)%400)
 		fuzzDecodeSrv.mu.Lock()
 		fuzzDecodeSrv.status, fuzzDecodeSrv.body = status, body
 		fuzzDecodeSrv.mu.Unlock()
@@ -139,7 +141,7 @@ func FuzzKMSResponseDecode(f *testing.F) {
 			return // a well-formed success body: nothing to classify
 		}
 		// wrap exactly like realKMS does, then classify
-		we := classify(fmt.Errorf("failed to encrypt sops data key with OCI KMS key: %w", err))
+		we := classify(fmt.Errorf(encryptWrapFormat, err))
 		switch we.Code {
 		case CodeInvalidRequest, CodeAuthFailed, CodeKeyUnavailable, CodeInternal:
 			// frozen taxonomy: classify never escapes it
