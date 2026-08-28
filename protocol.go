@@ -95,8 +95,10 @@ type Handler interface {
 // until stdin closes (clean exit). A returned error means the stream itself
 // was unusable; the caller should exit non-zero.
 func Serve(in io.Reader, out io.Writer, h Handler, pluginVersion string) error {
-	// sized so a max-length line plus terminator fits one ReadSlice
-	r := bufio.NewReaderSize(in, maxLineSize+1)
+	// sized to the host's cap exactly: the largest legal line is maxLineSize
+	// bytes INCLUDING the LF, so one byte more fills the buffer without a
+	// terminator and rejects
+	r := bufio.NewReaderSize(in, maxLineSize)
 	w := bufio.NewWriter(out)
 
 	line, err := readLine(r)

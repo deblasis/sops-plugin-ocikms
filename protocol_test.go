@@ -331,6 +331,24 @@ func TestExactBoundaryLineAccepted(t *testing.T) {
 	}
 }
 
+// TestOneByteOverBoundaryRejected: a line of maxLineSize content bytes plus
+// the LF (maxLineSize+1 total) is one byte past the host's cap and must
+// reject, matching the host semantics instead of accepting a byte more.
+func TestOneByteOverBoundaryRejected(t *testing.T) {
+	prefix := `{"id":1,"action":"decrypt","wrapped":"`
+	suffix := `"}`
+	filler := maxLineSize - len(prefix) - len(suffix)
+	line := prefix + strings.Repeat("A", filler) + suffix
+	if len(line) != maxLineSize {
+		t.Fatalf("line is %d bytes, want %d", len(line), maxLineSize)
+	}
+	input := "{\"protocol\":\"sops-plugin\",\"max_version\":1}\n" + line + "\n"
+	err := Serve(strings.NewReader(input), io.Discard, &stubHandler{}, "0.1.0")
+	if err == nil || !strings.Contains(err.Error(), "cap") {
+		t.Fatalf("want oversize rejection, got %v", err)
+	}
+}
+
 func TestInboundCRLFTolerated(t *testing.T) {
 	// the host never sends CRLF, but a trailing CR is JSON whitespace; the
 	// reader is lenient and the exchange still works
