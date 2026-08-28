@@ -51,6 +51,11 @@ def on_decrypt(req):
     pt = store_kv_get("blobs", ct)
     if pt == None:
         return _err(404, "NotFound", "unknown ciphertext")
+    # bind ciphertext to its key like real KMS: the ciphertext is known but
+    # routed at the wrong key, so the request itself is wrong, not the key
+    # (400 invalid_request, not 404)
+    if store_kv_get("blobkeys", ct) != key_id:
+        return _err(400, "InvalidParameter", "ciphertext was not encrypted with key " + key_id)
     return respond(200, {"plaintext": pt, "plaintextChecksum": "simulated"})
 
 def _flap_fails():

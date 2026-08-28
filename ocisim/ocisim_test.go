@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -97,9 +98,7 @@ type pluginSession struct {
 
 func startPlugin(t *testing.T) *pluginSession {
 	t.Helper()
-	if sim == nil {
-		t.Skip("stunt server unavailable")
-	}
+	requireSim(t)
 	cmd := exec.Command(pluginBin)
 	cmd.Env = credEnv
 	stdin, err := cmd.StdinPipe()
@@ -191,6 +190,15 @@ func decryptReq(id int64, wrapped string) any {
 	}{id, "decrypt", wrapped}
 }
 
+// requireSim keeps the clean-skip behavior: without stunt the whole suite
+// skips, including tests that flip profiles before starting a plugin.
+func requireSim(t *testing.T) {
+	t.Helper()
+	if sim == nil {
+		t.Skip("stunt server unavailable")
+	}
+}
+
 func wantCode(t *testing.T, res wireResponse, code string) {
 	t.Helper()
 	if res.OK {
@@ -231,6 +239,35 @@ func TestUnknownKeyIsKeyUnavailable(t *testing.T) {
 	wantCode(t, res, "key_unavailable")
 }
 
+// TestDecryptBindsCiphertextToKey: the simulator binds each ciphertext to its
+// key, so a blob whose keyId was swapped after encrypt must not decrypt.
+func TestDecryptBindsCiphertextToKey(t *testing.T) {
+	s := startPlugin(t)
+	res := s.do(encryptReq(1, Key1, sim.Endpoint(), []byte("k")))
+	if !res.OK {
+		t.Fatalf("encrypt: %+v", res.Error)
+	}
+	payload, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(res.Wrapped, "ocikms.v1."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b struct {
+		KeyID          string `json:"keyId"`
+		CryptoEndpoint string `json:"cryptoEndpoint"`
+		Region         string `json:"region"`
+		CiphertextB64  string `json:"ciphertext"`
+	}
+	if err := json.Unmarshal(payload, &b); err != nil {
+		t.Fatal(err)
+	}
+	b.KeyID = Key2
+	forged, err := json.Marshal(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCode(t, s.do(decryptReq(2, "ocikms.v1."+base64.StdEncoding.EncodeToString(forged))), "invalid_request")
+}
+
 func TestFailureInjectionProfiles(t *testing.T) {
 	cases := []struct {
 		profile string
@@ -247,6 +284,7 @@ func TestFailureInjectionProfiles(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.profile, func(t *testing.T) {
+			requireSim(t)
 			if err := sim.Activate(tc.profile); err != nil {
 				t.Fatal(err)
 			}
@@ -259,6 +297,7 @@ func TestFailureInjectionProfiles(t *testing.T) {
 }
 
 func TestProfileRecovery(t *testing.T) {
+	requireSim(t)
 	if err := sim.Activate("outage-500"); err != nil {
 		t.Fatal(err)
 	}
@@ -274,6 +313,7 @@ func TestProfileRecovery(t *testing.T) {
 }
 
 func TestFlapAlternates(t *testing.T) {
+	requireSim(t)
 	if err := sim.Activate("flap"); err != nil {
 		t.Fatal(err)
 	}
@@ -287,6 +327,7 @@ func TestFlapAlternates(t *testing.T) {
 }
 
 func TestOversizedCiphertext(t *testing.T) {
+	requireSim(t)
 	if err := sim.Activate("oversized"); err != nil {
 		t.Fatal(err)
 	}
@@ -304,6 +345,7 @@ func TestOversizedCiphertext(t *testing.T) {
 }
 
 func TestSlowFailureIsKeyUnavailable(t *testing.T) {
+	requireSim(t)
 	if err := sim.Activate("slow-500-3s"); err != nil {
 		t.Fatal(err)
 	}
@@ -324,6 +366,7 @@ func TestHangHitsPluginDeadline(t *testing.T) {
 	if os.Getenv("OCISIM_SLOW") != "1" {
 		t.Skip("set OCISIM_SLOW=1 for the 30s hang boundary test")
 	}
+	requireSim(t)
 	if err := sim.Activate("hang"); err != nil {
 		t.Fatal(err)
 	}

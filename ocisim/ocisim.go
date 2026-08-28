@@ -198,11 +198,18 @@ func (s *Server) Endpoint() string { return s.endpoint }
 // outage-500, unavailable-503, slow-500-3s, hang) and the adapter modes
 // (flap, garbage, oversized). Runtime-only: Close discards the world.
 func (s *Server) Activate(profile string) error {
+	// nil-safe for callers that hold a Start() failure: tests skip instead
+	if s == nil {
+		return errors.New("ocisim: no server (stunt unavailable)")
+	}
 	return s.postProfile(map[string]string{"name": profile, "service": "ocikms"})
 }
 
 // Deactivate returns the simulator to healthy behavior.
 func (s *Server) Deactivate() error {
+	if s == nil {
+		return errors.New("ocisim: no server (stunt unavailable)")
+	}
 	return s.postProfile(map[string]string{"name": ""})
 }
 
