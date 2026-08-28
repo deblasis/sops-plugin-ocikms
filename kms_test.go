@@ -211,6 +211,43 @@ func TestEncryptRejectsEmptyPlaintext(t *testing.T) {
 	}
 }
 
+// Stunt-free cap coverage: a misbehaving backend must not push an ok:true
+// response line over the host's 1MiB cap from either direction, so both
+// oversized answers are rejected as internal on every CI run, no simulator.
+func TestEncryptCapsOversizedCiphertext(t *testing.T) {
+	h := handlerWithClient(fakeAPI{encrypt: func(context.Context, string, string) (string, error) {
+		return strings.Repeat("A", maxCiphertextB64Len+1), nil
+	}}, nil)
+	_, _, err := h.Encrypt(map[string]any{"key_id": "k", "crypto_endpoint": "e"}, rampProbe())
+	we := wireErr(t, err)
+	if we.Code != CodeInternal {
+		t.Fatalf("code = %s, want internal", we.Code)
+	}
+	if !strings.Contains(we.Message, "oversized ciphertext") {
+		t.Fatalf("message %q does not name the oversized ciphertext", we.Message)
+	}
+}
+
+func TestDecryptCapsOversizedPlaintext(t *testing.T) {
+	blobJSON, _ := json.Marshal(blob{
+		KeyID:          "ocid1.key.oc1.r.v.k",
+		CryptoEndpoint: "https://v-crypto.kms.r.oraclecloud.com",
+		Region:         "r",
+		CiphertextB64:  "Y2lwaGVydGV4dA==",
+	})
+	h := handlerWithClient(fakeAPI{decrypt: func(context.Context, string, string) (string, error) {
+		return base64.StdEncoding.EncodeToString(make([]byte, maxPlaintextB64Len+1)), nil
+	}}, nil)
+	_, err := h.Decrypt(BlobPrefix + base64.StdEncoding.EncodeToString(blobJSON))
+	we := wireErr(t, err)
+	if we.Code != CodeInternal {
+		t.Fatalf("code = %s, want internal", we.Code)
+	}
+	if !strings.Contains(we.Message, "oversized plaintext") {
+		t.Fatalf("message %q does not name the oversized plaintext", we.Message)
+	}
+}
+
 // fakeAPI scripts client-level behavior for the mapping tests. Errors are
 // wrapped exactly like realKMS wraps them (%w through fmt.Errorf), so the
 // classification tests run through the same wrapping the real path produces;
@@ -223,7 +260,7 @@ type fakeAPI struct {
 func (f fakeAPI) Encrypt(ctx context.Context, keyID, ptB64 string) (string, error) {
 	ct, err := f.encrypt(ctx, keyID, ptB64)
 	if err != nil {
-		return "", fmt.Errorf("failed to encrypt sops data key with OCI KMS key: %w", err)
+		return "", fmt.Errorf(encryptWrapFormat, err)
 	}
 	return ct, nil
 }
@@ -231,7 +268,7 @@ func (f fakeAPI) Encrypt(ctx context.Context, keyID, ptB64 string) (string, erro
 func (f fakeAPI) Decrypt(ctx context.Context, keyID, ctB64 string) (string, error) {
 	pt, err := f.decrypt(ctx, keyID, ctB64)
 	if err != nil {
-		return "", fmt.Errorf("failed to decrypt sops data key with OCI KMS key: %w", err)
+		return "", fmt.Errorf(decryptWrapFormat, err)
 	}
 	return pt, nil
 }

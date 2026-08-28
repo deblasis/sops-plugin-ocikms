@@ -133,6 +133,11 @@ const defaultRequestTimeout = 30 * time.Second
 // failure downstream past the protocol's 1 MiB line cap.
 const maxCiphertextB64Len = 128 << 10
 
+// maxPlaintextB64Len bounds the plaintext the plugin will unwrap, same
+// reasoning from the decrypt direction: an ok:true response line must never
+// blow the host's cap from either side.
+const maxPlaintextB64Len = 128 << 10
+
 func (h *KMSHandler) timeout() time.Duration {
 	if h.RequestTimeout > 0 {
 		return h.RequestTimeout
@@ -248,6 +253,10 @@ func (h *KMSHandler) Decrypt(wrapped string) ([]byte, error) {
 	ptB64, err := c.Decrypt(ctx, b.KeyID, b.CiphertextB64)
 	if err != nil {
 		return nil, classify(err)
+	}
+	// checked before decoding: no point un-basing megabytes just to reject them
+	if len(ptB64) > maxPlaintextB64Len {
+		return nil, &WireError{Code: CodeInternal, Message: "KMS returned an oversized plaintext"}
 	}
 	plaintext, err := base64.StdEncoding.DecodeString(ptB64)
 	if err != nil {
